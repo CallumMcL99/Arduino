@@ -14,11 +14,10 @@ char endChar = '#';
 char seperatorChar = ' ';
 String canID = "FFFF07";
 
-//unsigned int msgOne[8] = {0x2, 0x4, 0x0, 0x0,   0xF, 0xF,   0xF, 0xF};
-unsigned char msgOne[8] = {'2', '4', '0', '0',   'F', 'F',   'F', 'F'};
-unsigned char msgTwo[8] = {'0','7',   '0','0',   '0','1',   '0','2'};
-unsigned char msgThree[8] = {'0','3', '0','0',   '0','0',   '2','3'};
-unsigned char msgFour[8] =  {'2','3', '0','0',   '0','0',   '0','0'};
+unsigned char msgOne[8] =   {0x2,0x4,  0x0,0x0,   0xF,0xF,   0xF,0xF}; //24 00 FF FF
+unsigned char msgTwo[8] =   {0x0,0xB,  0x2,0x0,   0x0,0x1,   0x0,0x2}; //09 10 01 02
+unsigned char msgThree[8] = {0x0,0x3,  0x0,0x0,   0x0,0x0,   0x0,0x0}; //03 00 00 00
+unsigned char msgFour[8] =  {0x2,0x3,  0x0,0x0,   0x0,0x0,   0x0,0x0}; //23 00 00 00
 
 
 
@@ -65,7 +64,7 @@ void loop()
     ReadMessages();
   }
   else{
-    SendCanMessage(msgOne, "1");
+    PrintMessage("");
   }
 
   if (CAN.checkError() == CAN_CTRLERROR)
@@ -85,16 +84,16 @@ void PrintMessage(String message)
   // fullMessage.toCharArray(fullMessageBuffer, fullMessageLength); 
   //CAN.sendMsgBuf(0x06, 0, fullMessageLength, fullMessageBuffer);
 
-  //SendCanMessage(msgOne, "1");
-  //SendCanMessage(msgOne, "2");
-  //SendCanMessage(msgOne, "3");
-  //SendCanMessage(msgOne, "4");
+  SendCanMessage(msgOne, "1");
+  SendCanMessage(msgOne, "2");
+  SendCanMessage(msgOne, "3");
+  SendCanMessage(msgOne, "4");
   
 }
 
 void SendCanMessage(unsigned char message[], String name){
   // FFFF07 - 16776967
-  if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF07, 0, sizeof(message), message)){
+  if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF0B, 1, sizeof(message), message)){
     Serial.println("Sent CAN " + name);
   }
   else{
