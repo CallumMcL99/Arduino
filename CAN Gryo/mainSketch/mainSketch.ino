@@ -13,7 +13,7 @@ DFRobot_MCP2515 CAN(SPI_CS_PIN);
 
 uint32_t canID = 0x00FFFF0C;
 const int size = 8;
-unsigned char msgOne[size] =  {0x24, 0x00, 0x00, 0xFF, 0xFF, 0xAA, 0xBB, 0xDD};
+uint8_t messageOne[size] =  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 void setup()
 {
@@ -49,13 +49,37 @@ void loop()
 {
   BNO::sEulAnalog_t   sEul;
   sEul = bno.getEul();
-  //PrintMessage(seperatorChar + "1" + seperatorChar + String(sEul.pitch, 3) + seperatorChar + String(sEul.roll, 3) + seperatorChar + String(sEul.head, 3));
+  uint16_t pitch16 = sEul.pitch;
+  uint16_t roll16 = sEul.roll;
+  uint16_t head16 = sEul.head;
+
+  uint8_t pitchOne = 0;
+  uint8_t pitchTwo = 0;
+  uint8_t rollOne = 0;
+  uint8_t rollTwo = 0;
+  uint8_t headOne = 0;
+  uint8_t headTwo = 0;
+
+  EncodeFloat(sEul.pitch, pitchOne, pitchTwo);
+  EncodeFloat(sEul.roll, rollOne, rollTwo);
+  EncodeFloat(sEul.head, headOne, headTwo);
+  
+  Serial.println("Pitch: " + String(sEul.pitch, 0) + ". Roll: " + String(sEul.roll, 0) + ". Head: " + String(sEul.head, 0));
+  Serial.println("Pitch: " + String(pitchOne + pitchTwo) + ". Roll: " + String(rollOne + rollTwo) + ". Head: " + String(headOne + headTwo));
+  Serial.println("");
+
+  messageOne[0] = headOne;
+  messageOne[1] = headTwo;
+  messageOne[2] = pitchOne;
+  messageOne[3] = pitchTwo;
+  messageOne[4] = rollOne;
+  messageOne[5] = rollTwo;
 
   if(CAN_MSGAVAIL == CAN.checkReceive()) {
     ReadMessages();
   }
   else{
-    SendCanMessage(msgOne);
+    SendCanMessage(messageOne);
   }
 
   // if (CAN.checkError() == CAN_CTRLERROR)
@@ -66,9 +90,32 @@ void loop()
   delay(100);
 }
 
-void SendCanMessage(unsigned char message[]){
+void EncodeFloat(float value, uint8_t &outOne, uint8_t &outTwo){
+  const int byteValue = 255;
+  const int maxValue = 360;
+  int roundedValue = value;
+
+  if (roundedValue < 0)
+  {
+    roundedValue = maxValue + roundedValue;
+  }
+
+  if (roundedValue <= byteValue)
+  {
+    outOne = roundedValue;
+    outTwo = 0;
+  }
+  else
+  {
+    outOne = byteValue;
+    outTwo = roundedValue - byteValue;
+  }
+
+}
+
+void SendCanMessage(uint8_t message[]){
   Serial.println("Sending CAN");
-  CAN.sendMsgBuf(0x00FFFF0C, 1, size, message);
+  CAN.sendMsgBuf(canID, 1, size, message);
 
   // if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF0C, 1, size, message)){
   //   Serial.println("Sent CAN ");
