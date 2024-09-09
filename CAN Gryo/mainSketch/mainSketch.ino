@@ -12,12 +12,10 @@ DFRobot_MCP2515 CAN(SPI_CS_PIN);
 char startChar = '$';
 char endChar = '#';
 char seperatorChar = ' ';
-String canID = "FFFF07";
+uint32_t canID = 0x00FFFF0C;
 
-unsigned char msgOne[8] =   {0x2,0x4,  0x0,0x0,   0xF,0xF,   0xF,0xF}; //24 00 FF FF
-unsigned char msgTwo[8] =   {0x0,0xB,  0x2,0x0,   0x0,0x1,   0x0,0x2}; //09 10 01 02
-unsigned char msgThree[8] = {0x0,0x3,  0x0,0x0,   0x0,0x0,   0x0,0x0}; //03 00 00 00
-unsigned char msgFour[8] =  {0x2,0x3,  0x0,0x0,   0x0,0x0,   0x0,0x0}; //23 00 00 00
+const int size = 10;
+unsigned char msgOne[size] =  {0x24, 0x00, 0x00, 0xFF, 0xFF, 0xAA, 0xBB, 0xCC};
 
 
 
@@ -77,23 +75,20 @@ void loop()
 
 void PrintMessage(String message)
 {
-  // String fullMessage = startChar + canID + seperatorChar + message + endChar;
-  //Serial.println(fullMessage);
-  // int fullMessageLength = fullMessage.length();
-  // char fullMessageBuffer[fullMessageLength];
-  // fullMessage.toCharArray(fullMessageBuffer, fullMessageLength); 
-  //CAN.sendMsgBuf(0x06, 0, fullMessageLength, fullMessageBuffer);
-
-  SendCanMessage(msgOne, "1");
-  SendCanMessage(msgOne, "2");
-  SendCanMessage(msgOne, "3");
-  SendCanMessage(msgOne, "4");
-  
+    SendCanMessage(msgOne, "1");
 }
 
 void SendCanMessage(unsigned char message[], String name){
   // FFFF07 - 16776967
-  if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF0B, 1, sizeof(message), message)){
+  Serial.print("Snd msg: ");
+  for (int i = 0; i < size; i++)
+  {
+    Serial.print(message[i]);
+    Serial.print(", ");
+  }
+  Serial.println("");
+
+  if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF0C, 1, size, message)){
     Serial.println("Sent CAN " + name);
   }
   else{
