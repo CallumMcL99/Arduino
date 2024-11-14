@@ -116,7 +116,7 @@ void EncodeFloat(float value, uint8_t &outOne, uint8_t &outTwo){
 void SendCanMessage(uint8_t message[]){
   Serial.println("Sending CAN");
   CAN.sendMsgBuf(canID, 1, size, message);
-
+  
   // if (MCP2515_OK == CAN.sendMsgBuf(0x00FFFF0C, 1, size, message)){
   //   Serial.println("Sent CAN ");
   // }
