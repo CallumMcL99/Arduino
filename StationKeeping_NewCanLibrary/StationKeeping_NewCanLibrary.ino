@@ -1,12 +1,45 @@
-#include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
 #include <SPI.h>
 #include <PID_v1.h>
-#include <Ethernet.h>
+
+// demo: CAN-BUS Shield, receive data with check mode
+// send data coming to fast, such as less than 10ms, you can use this way
+// loovee, 2014-6-13
+#include <SPI.h>
+
+#define CAN_2515
+// #define CAN_2518FD
+
+// Set SPI CS Pin according to your hardware
+
+#if defined(SEEED_WIO_TERMINAL) && defined(CAN_2518FD)
+// For Wio Terminal w/ MCP2518FD RPi Hat：
+// Channel 0 SPI_CS Pin: BCM 8
+// Channel 1 SPI_CS Pin: BCM 7
+// Interupt Pin: BCM25
+const int SPI_CS_PIN  = BCM8;
+const int CAN_INT_PIN = BCM25;
+#else
+
+// For Arduino MCP2515 Hat:
+// the cs pin of the version after v1.1 is default to D9
+// v0.9b and v1.0 is default D10
+const int SPI_CS_PIN = 9;
+const int CAN_INT_PIN = 2;
+#endif
+
+
+#ifdef CAN_2518FD
+#include "mcp2518fd_can.h"
+mcp2518fd CAN(SPI_CS_PIN); // Set CS pin
+#endif
+
+#ifdef CAN_2515
+#include "mcp2515_can.h"
+mcp2515_can CAN(SPI_CS_PIN); // Set CS pin
+#endif     
 
 // CAN-BUS
-const int SPI_CS_PIN = 9;
-DFRobot_MCP2515 CAN(SPI_CS_PIN);
 const int arduinoAddress = 9;
 int canErrorCount = 0;
 
@@ -42,76 +75,28 @@ double yKp = 2, yKi = 5, yKd = 1;
 PID latitudePID(&currentXAccumulation, &xOutput, &holdX, xKp, xKi, xKd, DIRECT);
 PID longitudePID(&currentYAccumulation, &yOutput, &holdY, yKp, yKi, yKd, DIRECT);
 
-// Ethernet
-byte mac[] = {
-  0xA8, 0x61, 0x0A, 0xAE, 0x24, 0x16
-};
-IPAddress ip(192, 168, 137, 177);
-
-// This port must match the port that tcp is being sent over.
-int port = 10002;
-
-// Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
-// If connecting to a Windows device, this is configured through:
-// Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
-IPAddress server(192, 168, 137, 1);
-int connectionFailedCounter = 0;
-EthernetClient client;
-
 // Debug
 bool messageSent = false;
 
 void setup() {
   Serial.begin(57600);
-  while (!Serial) ;
-
-  Serial.println("Serial initialisation - COMPLETE");
-
   InitialiseCanShield();
-  InitialiseEthernetShield();
 }
 
 void InitialiseCanShield() {
-  Serial.println("CAN Shield Initialisation - START");
+  SERIAL_PORT_MONITOR.begin(57600);
 
-  while (CAN_OK != CAN.begin(CAN_500KBPS)){
-      Serial.println("CAN Shield Initialisation - ERROR");
-      delay(100);
-  }
-  
-  Serial.println("CAN Shield Initialisation - SUCCESS");
-}
-
-void InitialiseEthernetShield(){
-  // You can use Ethernet.init(pin) to configure the CS pin
-
-  // start the Ethernet connection:
-  Ethernet.begin(mac, ip);
-
-  // Check for Ethernet hardware present
-  while (Ethernet.hardwareStatus() == EthernetNoHardware) {
-    Serial.println("Ethernet Shield Initialisation - ERROR - Ethernet shield was not found");
-    delay(500);
-  }
-
-  while (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("Ethernet Shield Initialisation - ERROR - cable is not connected.");
-    delay(500);
-  }
-
-  // give the Ethernet shield a second to initialize:
-  delay(1000);
-
-  Serial.println("Ethernet Shield Initialisation - COMPLETE.");
+    while (CAN_OK != CAN.begin(CAN_500KBPS)) {             // init can bus : baudrate = 500k
+        SERIAL_PORT_MONITOR.println("CAN init fail, retry...");
+        delay(100);
+    }
+    SERIAL_PORT_MONITOR.println("CAN init ok!");
 }
 
 void loop() {
-  HandleCanBus();
-  HandleEthernetShieldConnection();
-  HandleStationKeeping();
-}
+  messageSent = false;
 
-void HandleCanBus(){
+  
   if (CAN.checkError() != CAN_CTRLERROR) {
     ReadCanBusMessage();
   } else {
@@ -122,6 +107,29 @@ void HandleCanBus(){
       canErrorCount = 0;
       InitialiseCanShield();
     }
+  }
+
+  unsigned long now = millis();
+  if ((now - delayBetweenSendingMessagesMs) > lastMessageSent)
+  {
+    if (stationKeepingEnabled) {
+      RovInsReadMessage();
+      //HandleStationKeeping();
+    }
+
+    lastMessageSent = now;
+
+    messageOne[0] = 0;
+    messageOne[1] = 0;
+    messageOne[2] = 0;
+    messageOne[3] = 0;
+    messageOne[4] = 0;
+    messageOne[5] = stationKeepingEnabled ? 2 : 1;
+    messageOne[6] = 0;
+    messageOne[7] = 0;
+
+    SendCanMessage(0xFF8F, 9, messageOne);
+    Serial.println("Heartbeat: " + String(stationKeepingEnabled));
   }
 }
 
@@ -177,74 +185,7 @@ void ReadCanBusMessage() {
   }
 }
 
-void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
-  uint32_t fullId = (id << 8) + address;
-  CAN.sendMsgBuf(fullId, 1, size, message);
-}
-
-void HandleEthernetShieldConnection(){
-  if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF && connectionFailedCounter < 20)
-  {
-    if (!client.connected()){
-
-      // Disconnect from previous connection.
-      client.stop();
-
-      // if you get a connection, report back via serial:
-      if (client.connect(server, 10002)) {
-        Serial.println("Ethernet Shield RT - client connected.");
-        connectionFailedCounter = 0;
-      } 
-      else {
-        // if you didn't get a connection to the server:
-        Serial.println("Ethernet Shield RT - No client found.");
-        connectionFailedCounter++;
-      }
-    }
-  }
-  else {
-    Serial.println("Ethernet Shield RT - Error.");
-
-    if (client.connected()){
-      // Disconnect from previous connection.
-      client.stop();
-    }
-
-    InitialiseEthernetShield();
-  }
-}
-
-void SaveCurrentPositionForStationKeeping() {
-  holdX = 0;
-  holdY = 0;
-}
-
-void HandleStationKeeping(){
-  unsigned long now = millis();
-  if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
-  {
-    lastMessageSent = now;
-
-    if (stationKeepingEnabled) {
-      RovInsReadMessage();
-      //HandlePidAndSendThrusterCommand();
-    }
-
-    messageOne[0] = 0;
-    messageOne[1] = 0;
-    messageOne[2] = 0;
-    messageOne[3] = 0;
-    messageOne[4] = 0;
-    messageOne[5] = stationKeepingEnabled ? 2 : 1;
-    messageOne[6] = 0;
-    messageOne[7] = 0;
-
-    SendCanMessage(0xFF8F, 9, messageOne);
-    Serial.println("Heartbeat: " + String(stationKeepingEnabled));
-  }
-}
-
-void HandlePidAndSendThrusterCommand() {
+void HandleStationKeeping() {
   //unsigned long now = millis();
   //if ((now - delayBetweenSendingMessagesMs) > lastMessageSent && newPosition)
   //{
@@ -270,6 +211,16 @@ void HandlePidAndSendThrusterCommand() {
   //}
 }
 
+void SaveCurrentPositionForStationKeeping() {
+  holdX = 0;
+  holdY = 0;
+}
+
+void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
+  uint32_t fullId = (id << 8) + address;
+  CAN.sendMsgBuf(fullId, 1, size, message);
+}
+
 void SendThrusterCommand(float foreAft, float lateral) {
   messageOne[0] = (byte)foreAft >> 8;    // Fore Msb
   messageOne[1] = (byte)foreAft & 0xFF;  // Fore Lsb
@@ -287,28 +238,6 @@ void SendThrusterCommand(float foreAft, float lateral) {
 }
 
 void RovInsReadMessage() {
-  if (client.connected()){
-
-    // TODO: Error checking with maintain();
-    Ethernet.maintain();
-
-    // if there are incoming bytes available
-    // from the server, read them and print them:
-    if (client.available()) {
-      char c = client.read();
-      if (c != '\n')
-      {
-        Serial.print(c);
-      }
-      else{
-        Serial.println();
-      }
-    }
-    else{
-      delay(500);
-    }
-  }
-
   if (Serial.available()) {
 
     bool foundVelocityMessage = false;
@@ -319,30 +248,31 @@ void RovInsReadMessage() {
     String message;
     do
     {
+      //message = Serial.readBytes(buffer, 5);
       message = Serial.readStringUntil(':');
-      if (message.length() > 24)
-      {
-        if (message.charAt(0) == 'B' && message.charAt(1) == 'I' && message.charAt(2) == ',')
-        {
-          foundVelocityMessage = true;
-        }
-      }
+      // if (message.length() > 24)
+      // {
+      //   if (message.charAt(0) == 'B' && message.charAt(1) == 'I' && message.charAt(2) == ',')
+      //   {
+      //     foundVelocityMessage = true;
+      //   }
+      // }
 
       counter++;
     }
     while (Serial.available() && !foundVelocityMessage && counter < maxAttempts);
     
-    if (foundVelocityMessage)
-    {
-      int xVelocity = message.substring(3, 9).toInt();
-      int yVelocity = message.substring(10, 16).toInt();
+    // if (foundVelocityMessage)
+    // {
+    //   int xVelocity = message.substring(3, 9).toInt();
+    //   int yVelocity = message.substring(10, 16).toInt();
 
-      currentXAccumulation += xVelocity;
-      currentYAccumulation += yVelocity;
+    //   currentXAccumulation += xVelocity;
+    //   currentYAccumulation += yVelocity;
 
-      newVelocityData = true;
+    //   newVelocityData = true;
 
-      Serial.println("Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
-    }
+    //   //Serial.println("Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+    // }
   }
 }
