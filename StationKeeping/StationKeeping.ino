@@ -83,12 +83,10 @@ void InitialiseCanShield() {
 }
 
 void InitialiseEthernetShield(){
-  // You can use Ethernet.init(pin) to configure the CS pin
-
-  // start the Ethernet connection:
+  // Start the Ethernet connection.
   Ethernet.begin(mac, ip);
 
-  // Check for Ethernet hardware present
+  // Check for Ethernet hardware present.
   while (Ethernet.hardwareStatus() == EthernetNoHardware) {
     Serial.println("Ethernet Shield Initialisation - ERROR - Ethernet shield was not found");
     delay(500);
@@ -99,7 +97,7 @@ void InitialiseEthernetShield(){
     delay(500);
   }
 
-  // give the Ethernet shield a second to initialize:
+  // Give the Ethernet shield a second to initialize.
   delay(1000);
 
   Serial.println("Ethernet Shield Initialisation - COMPLETE.");
@@ -108,14 +106,14 @@ void InitialiseEthernetShield(){
 void loop() {
   HandleCanBus();
   HandleEthernetShieldConnection();
-  HandleStationKeeping();
+  //HandleStationKeeping();
 }
 
 void HandleCanBus(){
   if (CAN.checkError() != CAN_CTRLERROR) {
     ReadCanBusMessage();
   } else {
-    Serial.println("E can " + String(canErrorCount));
+    Serial.println("Can bus RT - Error " + String(canErrorCount));
     canErrorCount++;
 
     if (canErrorCount > 30) {
@@ -136,45 +134,55 @@ void ReadCanBusMessage() {
     uint32_t command = id >> 8;
     uint32_t address = id - (command << 8);
 
-    // DEBUG: Print out the message split into it's parts.
-    // String commandStr = String(command, HEX);
-    // commandStr.toUpperCase();
-    // String dataStr = "";
-    // for (int i = 0; i < len; i++) {
-    //   dataStr += String(buf[i], HEX) + ", ";
-    // }
-    // Serial.println("Message from address: " + String(address) + ", command: " + commandStr + ". DLC: " + String(len) + ". Data: " + dataStr);
+    PrintCanMessage(id, buf, len);
 
     if (address == arduinoAddress) {
 
-      //Serial.println("CanBus -- Message read " + String(command));
+      PrintCanMessage(id, buf, len);
 
-      // System Mode Control command
       if (command == 0xFFAA) {
-        if (buf[5] == 1 || buf[5] == 2) {
-          bool newStationKeeping = buf[5] == 2;
-
-          // If value has been toggled.
-          if (newStationKeeping != stationKeepingEnabled) {
-            stationKeepingEnabled = newStationKeeping;
-
-            if (stationKeepingEnabled) {
-              holdX = 0;
-              holdY = 0;
-              
-              latitudePID.SetMode(AUTOMATIC);
-              longitudePID.SetMode(AUTOMATIC);
-
-              Serial.println("Station keeping enabled.");
-              newPosition = false;
-            } else {
-              Serial.println("Station keeping disabled.");
-            }
-          }
-        }
+        HandleSystemModeControlCommand(buf);
       }
     }
   }
+}
+
+void HandleSystemModeControlCommand(uint8_t buf[]){
+  if (buf[5] == 1 || buf[5] == 2) {
+    bool newStationKeeping = buf[5] == 2;
+
+    // If value has been toggled.
+    if (newStationKeeping != stationKeepingEnabled) {
+      stationKeepingEnabled = newStationKeeping;
+
+      if (stationKeepingEnabled) {
+        holdX = 0;
+        holdY = 0;
+        
+        latitudePID.SetMode(AUTOMATIC);
+        longitudePID.SetMode(AUTOMATIC);
+
+        Serial.println("Station keeping enabled.");
+        newPosition = false;
+      } else {
+        Serial.println("Station keeping disabled.");
+      }
+    }
+  }
+}
+
+void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
+  uint32_t command = id >> 8;
+  uint32_t address = id - (command << 8);
+
+  String commandStr = String(command, HEX);
+  commandStr.toUpperCase();
+  String dataStr = "";
+  for (int i = 0; i < len; i++) {
+    dataStr += String(buf[i], HEX) + ", ";
+  }
+
+  Serial.println("CAN Message: Address: " + String(address) + ". Command: " + commandStr + ". DLC: " + String(len) + ". Data: " + dataStr);
 }
 
 void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
