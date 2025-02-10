@@ -19,8 +19,8 @@ const unsigned long delayBetweenSendingMessagesMs = 500;
 // Station keeping
 bool stationKeepingEnabled = false;
 bool newPosition = false;
-double holdX;
-double holdY;
+double holdX = 0;
+double holdY = 0;
 uint8_t yawMsb;
 uint8_t yawLsb;
 uint8_t foreMsb;
@@ -29,18 +29,18 @@ uint8_t latMsb;
 uint8_t latLsb;
 
 // Data from RovIns
-double currentXAccumulation;
-double currentYAccumulation;
+double currentXVelocity;
+double currentYVelocity;
 double currentDepth;
 bool newVelocityData = false;
 
 // PID
 //Define Variables we'll be connecting to
 double xOutput, yOutput;
-double xKp = 2, xKi = 5, xKd = 1;
-double yKp = 2, yKi = 5, yKd = 1;
-PID latitudePID(&currentXAccumulation, &xOutput, &holdX, xKp, xKi, xKd, DIRECT);
-PID longitudePID(&currentYAccumulation, &yOutput, &holdY, yKp, yKi, yKd, DIRECT);
+double xKp = 10, xKi = 10, xKd = 10;
+double yKp = 10, yKi = 10, yKd = 10;
+PID latitudePID(&currentXVelocity, &xOutput, &holdX, xKp, xKi, xKd, DIRECT);
+PID longitudePID(&currentYVelocity, &yOutput, &holdY, yKp, yKi, yKd, DIRECT);
 
 // Ethernet
 byte mac[] = {
@@ -58,6 +58,7 @@ IPAddress server(192, 168, 137, 1);
 int connectionFailedCounter = 0;
 EthernetClient client;
 
+bool EthernetConnected = false;
 // Debug
 bool messageSent = false;
 
@@ -104,9 +105,14 @@ void InitialiseEthernetShield(){
 }
 
 void loop() {
-  HandleCanBus();
-  HandleEthernetShieldConnection();
-  //HandleStationKeeping();
+  if (client.connected())
+  {
+    HandleCanBus();
+    HandleStationKeeping();
+  }
+  else{
+    HandleEthernetShieldConnection();
+  }
 }
 
 void HandleCanBus(){
@@ -134,11 +140,11 @@ void ReadCanBusMessage() {
     uint32_t command = id >> 8;
     uint32_t address = id - (command << 8);
 
-    PrintCanMessage(id, buf, len);
+    //PrintCanMessage(id, buf, len);
 
     if (address == arduinoAddress) {
 
-      PrintCanMessage(id, buf, len);
+      //PrintCanMessage(id, buf, len);
 
       if (command == 0xFFAA) {
         HandleSystemModeControlCommand(buf);
@@ -201,18 +207,20 @@ void HandleEthernetShieldConnection(){
       // if you get a connection, report back via serial:
       if (client.connect(server, 10002)) {
         Serial.println("Ethernet Shield RT - client connected.");
+        EthernetConnected = true;
         connectionFailedCounter = 0;
       } 
       else {
         // if you didn't get a connection to the server:
         Serial.println("Ethernet Shield RT - No client found.");
+        EthernetConnected = false;
         connectionFailedCounter++;
       }
     }
   }
   else {
     Serial.println("Ethernet Shield RT - Error.");
-
+    EthernetConnected = false;
     if (client.connected()){
       // Disconnect from previous connection.
       client.stop();
@@ -220,11 +228,6 @@ void HandleEthernetShieldConnection(){
 
     InitialiseEthernetShield();
   }
-}
-
-void SaveCurrentPositionForStationKeeping() {
-  holdX = 0;
-  holdY = 0;
 }
 
 void HandleStationKeeping(){
@@ -235,7 +238,7 @@ void HandleStationKeeping(){
 
     if (stationKeepingEnabled) {
       RovInsReadMessage();
-      //HandlePidAndSendThrusterCommand();
+      HandlePidAndSendThrusterCommand();
     }
 
     messageOne[0] = 0;
@@ -253,43 +256,47 @@ void HandleStationKeeping(){
 }
 
 void HandlePidAndSendThrusterCommand() {
-  //unsigned long now = millis();
-  //if ((now - delayBetweenSendingMessagesMs) > lastMessageSent && newPosition)
-  //{
-  //lastMessageSent = now;
-
   if (newVelocityData)
   {
     newVelocityData = false;
     latitudePID.Compute();
     longitudePID.Compute();
 
-    //Serial.println("PID processed: X in " + String(currentXAccumulation) + ", x out " + String(xOutput) + ".");
+    Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
 
-    
-    //Serial.availableForWrite()
-    // Send thruster message
-    //SendThrusterCommand(xOutput, yOutput); // READD
+    SendThrusterCommand(0, xOutput);//, yOutput);
     messageSent = true;
-
-    // When a message is send, clear the error count.
-    //canErrorCount = 0;
   }
-  //}
 }
 
-void SendThrusterCommand(float foreAft, float lateral) {
-  messageOne[0] = (byte)foreAft >> 8;    // Fore Msb
-  messageOne[1] = (byte)foreAft & 0xFF;  // Fore Lsb
+//
+// foreAft
+void SendThrusterCommand(int forward, int lateral) {
+
+  byte lateralMsb = 0;
+
+  if (lateral >= 0 )
+  {
+    lateralMsb = (byte)lateral >> 8;
+  }
+  else
+  {
+    int l = lateral >> 8;
+    lateralMsb = 256 + l;
+  }
+
+  messageOne[0] = (byte)forward >> 8;    // Fore Msb
+  messageOne[1] = (byte)forward & 0xFF;  // Fore Lsb
   messageOne[2] = 0;                     // Not used (vertical)
   messageOne[3] = 0;                     // Not used (vertical)
-  messageOne[4] = yawMsb;
-  messageOne[5] = yawLsb;
-  messageOne[6] = (byte)lateral >> 8;    // Lateral Msb
+  messageOne[4] = 0;//yawMsb;
+  messageOne[5] = 0;//yawLsb;
+  messageOne[6] = lateralMsb;//(byte)lateral >> 8;    // Lateral Msb
   messageOne[7] = (byte)lateral & 0xFF;  // Lateral Lsb
 
-  //Serial.println("Sent thruster command: F/A: " + String(foreAft) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
+  //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
+  Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
   SendCanMessage(0xFFFC, 0, messageOne);
 }
@@ -300,57 +307,58 @@ void RovInsReadMessage() {
     // TODO: Error checking with maintain();
     Ethernet.maintain();
 
-    // if there are incoming bytes available
-    // from the server, read them and print them:
     if (client.available()) {
-      char c = client.read();
-      if (c != '\n')
+      bool messageStarted = false;
+      bool messageEnded = false;
+      char message[40];
+      int i = 0;
+
+      while(client.available() && !messageEnded && i < 40)
       {
-        Serial.print(c);
-      }
-      else{
-        Serial.println();
-      }
-    }
-    else{
-      delay(500);
-    }
-  }
-
-  if (Serial.available()) {
-
-    bool foundVelocityMessage = false;
-    const int maxAttempts = 7;
-    int counter = 0;
-
-    char buffer[10];
-    String message;
-    do
-    {
-      message = Serial.readStringUntil(':');
-      if (message.length() > 24)
-      {
-        if (message.charAt(0) == 'B' && message.charAt(1) == 'I' && message.charAt(2) == ',')
+        char c = client.read();
+        if (messageStarted)
         {
-          foundVelocityMessage = true;
+          if (c != '\n')
+          {
+            message[i++] = c;
+          }
+          else
+          {
+            messageEnded = true;
+          }
+        }
+        else
+        {
+          if (c == ':')
+          {
+            messageStarted = true;
+          }
         }
       }
 
-      counter++;
-    }
-    while (Serial.available() && !foundVelocityMessage && counter < maxAttempts);
-    
-    if (foundVelocityMessage)
-    {
-      int xVelocity = message.substring(3, 9).toInt();
-      int yVelocity = message.substring(10, 16).toInt();
+      if (messageEnded)
+      {
+        String messageStr = String(message);
+        //Serial.println("TCP message finished: " + messageStr);
+        
+        int xVelocity = messageStr.substring(3, 9).toInt();
+        int yVelocity = messageStr.substring(10, 16).toInt();
 
-      currentXAccumulation += xVelocity;
-      currentYAccumulation += yVelocity;
+        currentXVelocity = xVelocity;
+        currentYVelocity = yVelocity;
 
-      newVelocityData = true;
+        newVelocityData = true;
 
-      Serial.println("Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+        //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+      }
+      else if (!messageStarted)
+      {
+        //Serial.println("TCP message never started.");
+      }
+      else
+      {
+        //Serial.println("TCP message i: " + String(i));
+      }
     }
   }
 }
