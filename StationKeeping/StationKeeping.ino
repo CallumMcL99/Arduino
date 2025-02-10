@@ -273,25 +273,26 @@ void HandlePidAndSendThrusterCommand() {
 // foreAft
 void SendThrusterCommand(int forward, int lateral) {
 
-  byte lateralMsb = 0;
+  int lateralMsb = lateral >> 8;
+  int forwardMsb = forward >> 8;
 
-  if (lateral >= 0 )
+  if (lateral < 0 )
   {
-    lateralMsb = (byte)lateral >> 8;
-  }
-  else
-  {
-    int l = lateral >> 8;
-    lateralMsb = 256 + l;
+    lateralMsb = 256 + lateralMsb;
   }
 
-  messageOne[0] = (byte)forward >> 8;    // Fore Msb
+  if (forward < 0 )
+  {
+    forwardMsb = 256 + forwardMsb;
+  }
+
+  messageOne[0] = (byte)forwardMsb;//forward >> 8;    // Fore Msb
   messageOne[1] = (byte)forward & 0xFF;  // Fore Lsb
   messageOne[2] = 0;                     // Not used (vertical)
   messageOne[3] = 0;                     // Not used (vertical)
   messageOne[4] = 0;//yawMsb;
   messageOne[5] = 0;//yawLsb;
-  messageOne[6] = lateralMsb;//(byte)lateral >> 8;    // Lateral Msb
+  messageOne[6] = (byte)lateralMsb;//(byte)lateral >> 8;    // Lateral Msb
   messageOne[7] = (byte)lateral & 0xFF;  // Lateral Lsb
 
   //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
