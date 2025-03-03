@@ -1,7 +1,7 @@
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
 #include <SPI.h>
-#include <PID_v1.h>
+#include <PID_v2.h>
 #include <Ethernet.h>
 
 // CAN-BUS
@@ -19,8 +19,6 @@ const unsigned long delayBetweenSendingMessagesMs = 500;
 // Station keeping
 bool stationKeepingEnabled = false;
 bool newPosition = false;
-double holdX = 0;
-double holdY = 0;
 uint8_t yawMsb;
 uint8_t yawLsb;
 uint8_t foreMsb;
@@ -37,10 +35,10 @@ bool newVelocityData = false;
 // PID
 //Define Variables we'll be connecting to
 double xOutput, yOutput;
-double xKp = 10, xKi = 10, xKd = 10;
-double yKp = 10, yKi = 10, yKd = 10;
-PID latitudePID(&currentXVelocity, &xOutput, &holdX, xKp, xKi, xKd, DIRECT);
-PID longitudePID(&currentYVelocity, &yOutput, &holdY, yKp, yKi, yKd, DIRECT);
+double xKp = 2, xKi = 5, xKd = 1;
+double yKp = 2, yKi = 5, yKd = 1;
+PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct);
+PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct);
 
 // Ethernet
 byte mac[] = {
@@ -70,6 +68,9 @@ void setup() {
 
   InitialiseCanShield();
   InitialiseEthernetShield();
+
+  latitudePID.SetOutputLimits(-1000, 1000);
+  longitudePID.SetOutputLimits(-1000, 1000);
 }
 
 void InitialiseCanShield() {
@@ -149,6 +150,10 @@ void ReadCanBusMessage() {
       if (command == 0xFFAA) {
         HandleSystemModeControlCommand(buf);
       }
+      else if (command == 0xFF9D)
+      {
+        HandlePidTuningCommand(buf);
+      }
     }
   }
 }
@@ -161,12 +166,12 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
     if (newStationKeeping != stationKeepingEnabled) {
       stationKeepingEnabled = newStationKeeping;
 
-      if (stationKeepingEnabled) {
-        holdX = 0;
-        holdY = 0;
-        
-        latitudePID.SetMode(AUTOMATIC);
-        longitudePID.SetMode(AUTOMATIC);
+      if (stationKeepingEnabled) {        
+        latitudePID.Start(0, 0, 0);
+        longitudePID.Start(0, 0, 0);
+
+        xOutput = 0;
+        yOutput = 0;
 
         Serial.println("Station keeping enabled.");
         newPosition = false;
@@ -175,6 +180,22 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
       }
     }
   }
+}
+
+void HandlePidTuningCommand(uint8_t buf[])
+{
+  xKp = buf[0];
+  xKi = buf[1];
+  xKd = buf[2];
+  
+  yKp = buf[0];
+  yKi = buf[1];
+  yKd = buf[2];
+
+  latitudePID.SetTunings(xKp, xKi, xKd);
+  longitudePID.SetTunings(yKp, yKi, yKd);
+  
+  Serial.println("New tunings: p" + String(buf[0]) + ", i" + String(buf[1]) + ", d" + String(buf[2]));
 }
 
 void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
@@ -251,7 +272,15 @@ void HandleStationKeeping(){
     messageOne[7] = 0;
 
     SendCanMessage(0xFF8F, 9, messageOne);
-    Serial.println("Heartbeat: " + String(stationKeepingEnabled));
+
+    if (!stationKeepingEnabled)
+    {
+      Serial.println("Heartbeat: " + String(stationKeepingEnabled));
+    }
+    else
+    {
+      Serial.println("Heartbeat: " + String(stationKeepingEnabled) + ". X: " + String(xOutput) + ". Y: " + String(yOutput));
+    }
   }
 }
 
@@ -259,12 +288,12 @@ void HandlePidAndSendThrusterCommand() {
   if (newVelocityData)
   {
     newVelocityData = false;
-    latitudePID.Compute();
-    longitudePID.Compute();
+    xOutput = latitudePID.Run(currentXVelocity);
+    yOutput = longitudePID.Run(currentYVelocity);
 
-    Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
+    //Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
 
-    SendThrusterCommand(0, xOutput);//, yOutput);
+    SendThrusterCommand(yOutput, xOutput);
     messageSent = true;
   }
 }
@@ -297,7 +326,7 @@ void SendThrusterCommand(int forward, int lateral) {
 
   //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
-  Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
+  //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
   SendCanMessage(0xFFFC, 0, messageOne);
 }
