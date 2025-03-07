@@ -37,8 +37,8 @@ bool newVelocityData = false;
 double xOutput, yOutput;
 double xKp = 2, xKi = 5, xKd = 1;
 double yKp = 2, yKi = 5, yKd = 1;
-PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct);
-PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct);
+PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct); //X
+PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct); //Y
 
 // Ethernet
 byte mac[] = {
@@ -57,6 +57,13 @@ int connectionFailedCounter = 0;
 EthernetClient client;
 
 bool EthernetConnected = false;
+
+// Attitude
+double Pitch = 0;
+double Roll = 0;
+double Heading = 0;
+double Depth = 0;
+
 // Debug
 bool messageSent = false;
 
@@ -109,6 +116,9 @@ void loop() {
   if (client.connected())
   {
     HandleCanBus();
+
+    // Read messages as quickly as possible
+    RovInsReadMessage();
     HandleStationKeeping();
   }
   else{
@@ -166,7 +176,10 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
     if (newStationKeeping != stationKeepingEnabled) {
       stationKeepingEnabled = newStationKeeping;
 
-      if (stationKeepingEnabled) {        
+      if (stationKeepingEnabled) {     
+        latitudePID = PID_v2(xKp, xKi, xKd, PID::Direct);
+        longitudePID = PID_v2(yKp, yKi, yKd, PID::Direct);
+
         latitudePID.Start(0, 0, 0);
         longitudePID.Start(0, 0, 0);
 
@@ -188,9 +201,9 @@ void HandlePidTuningCommand(uint8_t buf[])
   xKi = buf[1];
   xKd = buf[2];
   
-  yKp = buf[0];
-  yKi = buf[1];
-  yKd = buf[2];
+  yKp = buf[3];
+  yKi = buf[4];
+  yKd = buf[5];
 
   latitudePID.SetTunings(xKp, xKi, xKd);
   longitudePID.SetTunings(yKp, yKi, yKd);
@@ -256,22 +269,13 @@ void HandleStationKeeping(){
   if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
   {
     lastMessageSent = now;
-
+    
     if (stationKeepingEnabled) {
-      RovInsReadMessage();
       HandlePidAndSendThrusterCommand();
     }
 
-    messageOne[0] = 0;
-    messageOne[1] = 0;
-    messageOne[2] = 0;
-    messageOne[3] = 0;
-    messageOne[4] = 0;
-    messageOne[5] = stationKeepingEnabled ? 2 : 1;
-    messageOne[6] = 0;
-    messageOne[7] = 0;
-
-    SendCanMessage(0xFF8F, 9, messageOne);
+    SendAttitudeMessage(Heading, Pitch, Roll);
+    SendHeartBeatMessage();
 
     if (!stationKeepingEnabled)
     {
@@ -291,15 +295,13 @@ void HandlePidAndSendThrusterCommand() {
     xOutput = latitudePID.Run(currentXVelocity);
     yOutput = longitudePID.Run(currentYVelocity);
 
-    //Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
+    Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
 
     SendThrusterCommand(yOutput, xOutput);
     messageSent = true;
   }
 }
 
-//
-// foreAft
 void SendThrusterCommand(int forward, int lateral) {
 
   int lateralMsb = lateral >> 8;
@@ -329,6 +331,52 @@ void SendThrusterCommand(int forward, int lateral) {
   //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
   SendCanMessage(0xFFFC, 0, messageOne);
+}
+
+void SendAttitudeMessage(int heading, int pitch, int roll)
+{
+  int headingMsb = heading >> 8;
+  int pitchMsb = pitch >> 8;
+  int rollMsb = roll >> 8;
+
+  if (heading < 0 )
+  {
+    headingMsb = 256 + headingMsb;
+  }
+
+  if (pitch < 0 )
+  {
+    pitchMsb = 256 + pitchMsb;
+  }
+  
+  if (roll < 0 )
+  {
+    rollMsb = 256 + rollMsb;
+  }
+
+  messageOne[0] = (byte)headingMsb;
+  messageOne[1] = (byte)heading & 0xFF;
+  messageOne[2] = (byte)pitchMsb;
+  messageOne[3] = (byte)pitch & 0xFF;
+  messageOne[4] = (byte)rollMsb;
+  messageOne[5] = (byte)roll & 0xFF;
+  messageOne[6] = 0;
+  messageOne[7] = 0;
+  
+  SendCanMessage(0xFFFF, 0, messageOne);
+}
+
+void SendHeartBeatMessage(){
+    messageOne[0] = 0;
+    messageOne[1] = 0;
+    messageOne[2] = 0;
+    messageOne[3] = 0;
+    messageOne[4] = 0;
+    messageOne[5] = stationKeepingEnabled ? 2 : 1;
+    messageOne[6] = 0;
+    messageOne[7] = 0;
+
+    SendCanMessage(0xFF8F, 9, messageOne);
 }
 
 void RovInsReadMessage() {
@@ -369,17 +417,34 @@ void RovInsReadMessage() {
       if (messageEnded)
       {
         String messageStr = String(message);
-        //Serial.println("TCP message finished: " + messageStr);
-        
-        int xVelocity = messageStr.substring(3, 9).toInt();
-        int yVelocity = messageStr.substring(10, 16).toInt();
 
-        currentXVelocity = xVelocity;
-        currentYVelocity = yVelocity;
+        // DVL data
+        if (message[0] == 'B' && message[1] == 'I')
+        {
+          //Serial.println("TCP message finished: " + messageStr);
+          
+          int xVelocity = messageStr.substring(3, 9).toInt();
+          int yVelocity = messageStr.substring(10, 16).toInt();
 
-        newVelocityData = true;
+          currentXVelocity = xVelocity;
+          currentYVelocity = yVelocity;
 
-        //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+          newVelocityData = true;
+
+          //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+        }
+        // System attitude data
+        else if (message[0] == 'S' && message[1] == 'A')
+        {
+          // NEED TO VARIFY
+          Pitch = messageStr.substring(3, 9).toFloat();
+          Roll = messageStr.substring(10, 16).toFloat();
+          Heading = messageStr.substring(17, 22).toFloat();
+        }
+        else if (message[0] == 'B' && message[1] == 'D')
+        {
+          Depth = messageStr.substring(42, 49).toFloat();
+        }
       }
       else if (!messageStarted)
       {
