@@ -41,22 +41,27 @@ PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct); //X
 PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct); //Y
 
 // Ethernet
+// This is the mac address and ip address for this device. The mac address is on the back of the Ethernet Shield.
 byte mac[] = {
   0xA8, 0x61, 0x0A, 0xAE, 0x24, 0x16
 };
-IPAddress ip(192, 168, 137, 177);
+//IPAddress ip(192, 168, 137, 177);
+IPAddress ip(192, 168, 36, 177);
 
 // This port must match the port that tcp is being sent over.
-int port = 10002;
+// int port = 10002; // I use this port for simulation.
+// int port = 8111;  // This is the port for the RovIns.
+int ports[2] { 8111, 8112 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
-IPAddress server(192, 168, 137, 1);
-int connectionFailedCounter = 0;
-EthernetClient client;
+//IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
+IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns.
 
-bool EthernetConnected = false;
+int connectionFailedCounters[2] = { 0, 0 };
+EthernetClient clients[2];
+bool EthernetConnecteds[2] = { false, false };
 
 // Attitude
 double Pitch = 0;
@@ -113,16 +118,18 @@ void InitialiseEthernetShield(){
 }
 
 void loop() {
-  if (client.connected())
+  if (clients[0].connected() && clients[1])
   {
-    HandleCanBus();
+    //HandleCanBus();
 
     // Read messages as quickly as possible
-    RovInsReadMessage();
+    RovInsReadMessage_PhinsStandard();
     HandleStationKeeping();
   }
-  else{
-    HandleEthernetShieldConnection();
+  else
+  {
+    HandleEthernetShieldConnection(0);
+    HandleEthernetShieldConnection(1);
   }
 }
 
@@ -230,36 +237,37 @@ void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
   CAN.sendMsgBuf(fullId, 1, size, message);
 }
 
-void HandleEthernetShieldConnection(){
-  if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF && connectionFailedCounter < 20)
+void HandleEthernetShieldConnection(int index){
+  if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF && connectionFailedCounters[index] < 20)
   {
-    if (!client.connected()){
+    if (!clients[index].connected()){
 
       // Disconnect from previous connection.
-      client.stop();
+      clients[index].stop();
 
       // if you get a connection, report back via serial:
-      if (client.connect(server, 10002)) {
+      if (clients[index].connect(server, ports[index])) {
         Serial.println("Ethernet Shield RT - client connected.");
-        EthernetConnected = true;
-        connectionFailedCounter = 0;
+        EthernetConnecteds[index] = true;
+        connectionFailedCounters[index] = 0;
       } 
       else {
         // if you didn't get a connection to the server:
         Serial.println("Ethernet Shield RT - No client found.");
-        EthernetConnected = false;
-        connectionFailedCounter++;
+        EthernetConnecteds[index] = false;
+        connectionFailedCounters[index]++;
       }
     }
   }
   else {
     Serial.println("Ethernet Shield RT - Error.");
-    EthernetConnected = false;
-    if (client.connected()){
+    EthernetConnecteds[index] = false;
+    if (clients[index].connected()){
       // Disconnect from previous connection.
-      client.stop();
+      clients[index].stop();
     }
 
+    connectionFailedCounters[index] = 0;
     InitialiseEthernetShield();
   }
 }
@@ -279,11 +287,11 @@ void HandleStationKeeping(){
 
     if (!stationKeepingEnabled)
     {
-      Serial.println("Heartbeat: " + String(stationKeepingEnabled));
+      //Serial.println("Heartbeat: " + String(stationKeepingEnabled));
     }
     else
     {
-      Serial.println("Heartbeat: " + String(stationKeepingEnabled) + ". X: " + String(xOutput) + ". Y: " + String(yOutput));
+      //Serial.println("Heartbeat: " + String(stationKeepingEnabled) + ". X: " + String(xOutput) + ". Y: " + String(yOutput));
     }
   }
 }
@@ -363,6 +371,7 @@ void SendAttitudeMessage(int heading, int pitch, int roll)
   messageOne[6] = 0;
   messageOne[7] = 0;
   
+  Serial.println("Sent attitude: Heading: " + String(Heading) + ", Pitch: " + String(Pitch) + ", Roll: " + String(Roll));
   SendCanMessage(0xFFFF, 0, messageOne);
 }
 
@@ -379,21 +388,134 @@ void SendHeartBeatMessage(){
     SendCanMessage(0xFF8F, 9, messageOne);
 }
 
-void RovInsReadMessage() {
-  if (client.connected()){
+void RovInsReadMessage_PhinsStandard() {
+  if (clients[0].connected()){
 
     // TODO: Error checking with maintain();
     Ethernet.maintain();
 
-    if (client.available()) {
+    if (clients[0].available()) {
+      bool messageStarted = false;
+      bool messageEnded = false;
+      const int maxSize = 100;
+      char message[maxSize];
+      int i = 0;
+      
+      while(clients[0].available() && !messageEnded && i < maxSize)
+      {
+        char c = clients[0].read();
+        if (messageStarted)
+        {
+          if (c != '\n')
+          {
+            message[i++] = c;
+          }
+          else
+          {
+            messageEnded = true;
+          }
+        }
+        else
+        {
+          if (c == '$')
+          {
+            messageStarted = true;
+          }
+        }
+      }
+
+      if (messageEnded)
+      {
+        String messageStr = String(message);
+        
+        if (message[0] == 'H' && message[1] == 'E' && message[4] == 'T' && message[5] == ',')
+        {
+          //HEHDT,4.55,T*1B
+          char headingMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          bool commaFound = false;
+          int j = 0;
+          for (int i = 6; i < maxSize && !commaFound; i++)
+          {
+            if (message[i] != ',')
+            {
+              headingMessage[j] = message[i];
+              j++;
+            }
+            else
+            {
+              commaFound = true;
+            }
+          }
+
+          Heading = String(headingMessage).toFloat();
+          //Serial.println("Heading: " + String(Heading));
+        }
+        else if (message[0] == 'P' && message[1] == 'H' && message[4] == 'O' && message[5] == ',')
+        {
+          //PHTRO,7.44,P,14.22,B*71
+          //Serial.println(messageStr);
+
+          int commasFound = 0;
+          int j = 0;
+          char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+          for (int i = 6; i < maxSize && commasFound < 3; i++)
+          {
+            if (message[i] != ',')
+            {
+              if (commasFound == 0)
+              {
+                pitchMessage[j] = message[i];
+              }
+              else if (commasFound == 2)
+              {
+                rollMessage[j] = message[i];
+              }
+
+              j++;
+            }
+            else
+            {
+              j = 0;
+              commasFound++;
+            }
+          }
+
+          Pitch = String(pitchMessage).toFloat();
+          Roll = String(rollMessage).toFloat();
+
+          //Serial.println("Pitch: " + String(Pitch));
+          //Serial.println("Roll: " + String(Roll));
+        }
+      }
+      else if (!messageStarted)
+      {
+        //Serial.println("TCP message never started.");
+      }
+      else
+      {
+        //Serial.println("TCP message i: " + String(i));
+      }
+    }
+  }
+}
+
+void RovInsReadMessage_RDIPD11() {
+  if (clients[1].connected()){
+
+    // TODO: Error checking with maintain();
+    Ethernet.maintain();
+
+    if (clients[1].available()) {
       bool messageStarted = false;
       bool messageEnded = false;
       char message[40];
       int i = 0;
 
-      while(client.available() && !messageEnded && i < 40)
+      while(clients[1].available() && !messageEnded && i < 40)
       {
-        char c = client.read();
+        char c = clients[1].read();
         if (messageStarted)
         {
           if (c != '\n')
@@ -432,18 +554,6 @@ void RovInsReadMessage() {
           newVelocityData = true;
 
           //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
-        }
-        // System attitude data
-        else if (message[0] == 'S' && message[1] == 'A')
-        {
-          // NEED TO VARIFY
-          Pitch = messageStr.substring(3, 9).toFloat();
-          Roll = messageStr.substring(10, 16).toFloat();
-          Heading = messageStr.substring(17, 22).toFloat();
-        }
-        else if (message[0] == 'B' && message[1] == 'D')
-        {
-          Depth = messageStr.substring(42, 49).toFloat();
         }
       }
       else if (!messageStarted)
