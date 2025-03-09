@@ -14,7 +14,7 @@ int canErrorCount = 0;
 const int size = 8;
 uint8_t messageOne[size] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 unsigned long lastMessageSent = 0;
-const unsigned long delayBetweenSendingMessagesMs = 500;
+const unsigned long delayBetweenSendingMessagesMs = 100;
 
 // Station keeping
 bool stationKeepingEnabled = false;
@@ -50,14 +50,13 @@ IPAddress ip(192, 168, 36, 177);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
-// int port = 8111;  // This is the port for the RovIns.
 int ports[2] { 8111, 8112 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
-IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns.
+IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
 int connectionFailedCounters[2] = { 0, 0 };
 EthernetClient clients[2];
@@ -68,6 +67,7 @@ double Pitch = 0;
 double Roll = 0;
 double Heading = 0;
 double Depth = 0;
+double Altitude = 0;
 
 // Debug
 bool messageSent = false;
@@ -118,11 +118,18 @@ void InitialiseEthernetShield(){
 }
 
 void loop() {
-  if (clients[0].connected() && clients[1])
+  bool client0Connected = clients[0].connected();
+
+  // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
+  delay(100);
+  bool client1Connected = clients[1].connected();
+
+  if (client0Connected && client1Connected)
   {
-    //HandleCanBus();
+    HandleCanBus();
 
     // Read messages as quickly as possible
+    //RovInsReadMessage_OctansStandard();
     RovInsReadMessage_PhinsStandard();
     HandleStationKeeping();
   }
@@ -134,17 +141,18 @@ void loop() {
 }
 
 void HandleCanBus(){
-  if (CAN.checkError() != CAN_CTRLERROR) {
-    ReadCanBusMessage();
-  } else {
-    Serial.println("Can bus RT - Error " + String(canErrorCount));
-    canErrorCount++;
+  ReadCanBusMessage();
+  // if (CAN.checkError() != CAN_CTRLERROR) {
+  //   ReadCanBusMessage();
+  // } else {
+  //   Serial.println("Can bus RT - Error " + String(canErrorCount));
+  //   canErrorCount++;
 
-    if (canErrorCount > 30) {
-      canErrorCount = 0;
-      InitialiseCanShield();
-    }
-  }
+  //   if (canErrorCount > 30) {
+  //     canErrorCount = 0;
+  //     InitialiseCanShield();
+  //   }
+  // }
 }
 
 void ReadCanBusMessage() {
@@ -202,8 +210,7 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
   }
 }
 
-void HandlePidTuningCommand(uint8_t buf[])
-{
+void HandlePidTuningCommand(uint8_t buf[]){
   xKp = buf[0];
   xKi = buf[1];
   xKd = buf[2];
@@ -247,20 +254,20 @@ void HandleEthernetShieldConnection(int index){
 
       // if you get a connection, report back via serial:
       if (clients[index].connect(server, ports[index])) {
-        Serial.println("Ethernet Shield RT - client connected.");
+        Serial.println("Ethernet Shield RT " + String(index) + " - client connected.");
         EthernetConnecteds[index] = true;
         connectionFailedCounters[index] = 0;
       } 
       else {
         // if you didn't get a connection to the server:
-        Serial.println("Ethernet Shield RT - No client found.");
+        Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
         EthernetConnecteds[index] = false;
         connectionFailedCounters[index]++;
       }
     }
   }
   else {
-    Serial.println("Ethernet Shield RT - Error.");
+    Serial.println("Ethernet Shield RT " + String(index) + " - Error.");
     EthernetConnecteds[index] = false;
     if (clients[index].connected()){
       // Disconnect from previous connection.
@@ -283,6 +290,7 @@ void HandleStationKeeping(){
     }
 
     SendAttitudeMessage(Heading, Pitch, Roll);
+    SendDepthAltMessage(Depth, Altitude);
     SendHeartBeatMessage();
 
     if (!stationKeepingEnabled)
@@ -341,8 +349,7 @@ void SendThrusterCommand(int forward, int lateral) {
   SendCanMessage(0xFFFC, 0, messageOne);
 }
 
-void SendAttitudeMessage(int heading, int pitch, int roll)
-{
+void SendAttitudeMessage(int heading, int pitch, int roll){
   int headingMsb = heading >> 8;
   int pitchMsb = pitch >> 8;
   int rollMsb = roll >> 8;
@@ -371,8 +378,36 @@ void SendAttitudeMessage(int heading, int pitch, int roll)
   messageOne[6] = 0;
   messageOne[7] = 0;
   
-  Serial.println("Sent attitude: Heading: " + String(Heading) + ", Pitch: " + String(Pitch) + ", Roll: " + String(Roll));
+  //Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
   SendCanMessage(0xFFFF, 0, messageOne);
+}
+
+void SendDepthAltMessage(int depth, int alt){
+
+  int depthMsb = depth >> 8;
+  int altMsb = alt >> 8;
+
+  if (depth < 0 )
+  {
+    depthMsb = 256 + depthMsb;
+  }
+
+  if (alt < 0 )
+  {
+    altMsb = 256 + altMsb;
+  }
+
+  messageOne[0] = (byte)depthMsb;
+  messageOne[1] = (byte)depth & 0xFF;
+  messageOne[2] = (byte)altMsb;
+  messageOne[3] = (byte)alt & 0xFF;
+  messageOne[4] = 0;
+  messageOne[5] = 0;
+  messageOne[6] = 0;
+  messageOne[7] = 0;
+  
+  //Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+  SendCanMessage(0xFFFE, 0, messageOne);
 }
 
 void SendHeartBeatMessage(){
@@ -388,7 +423,7 @@ void SendHeartBeatMessage(){
     SendCanMessage(0xFF8F, 9, messageOne);
 }
 
-void RovInsReadMessage_PhinsStandard() {
+void RovInsReadMessage_OctansStandard() {
   if (clients[0].connected()){
 
     // TODO: Error checking with maintain();
@@ -501,19 +536,20 @@ void RovInsReadMessage_PhinsStandard() {
   }
 }
 
-void RovInsReadMessage_RDIPD11() {
+void RovInsReadMessage_PhinsStandard() {
   if (clients[1].connected()){
 
     // TODO: Error checking with maintain();
     Ethernet.maintain();
 
     if (clients[1].available()) {
+      const int maxSize = 100;
       bool messageStarted = false;
       bool messageEnded = false;
-      char message[40];
+      char message[maxSize];
       int i = 0;
 
-      while(clients[1].available() && !messageEnded && i < 40)
+      while(clients[1].available() && !messageEnded && i < maxSize)
       {
         char c = clients[1].read();
         if (messageStarted)
@@ -529,7 +565,7 @@ void RovInsReadMessage_RDIPD11() {
         }
         else
         {
-          if (c == ':')
+          if (c == '$')
           {
             messageStarted = true;
           }
@@ -540,20 +576,103 @@ void RovInsReadMessage_RDIPD11() {
       {
         String messageStr = String(message);
 
-        // DVL data
-        if (message[0] == 'B' && message[1] == 'I')
+        if (message[0] == 'P' && message[1] == 'I' && message[4] == 'E' && message[5] == ',')
         {
-          //Serial.println("TCP message finished: " + messageStr);
-          
-          int xVelocity = messageStr.substring(3, 9).toInt();
-          int yVelocity = messageStr.substring(10, 16).toInt();
+          if (message[6] == 'S' && message[7] == 'P' && message[10] == 'D' && message[11] == '_')
+          {
+            //$PIXSE,SPEED_,x.xxx,y.yyy,z.zzz*hh<CR><LF>
+            //Serial.println(messageStr);
+            //Serial.println("TCP message finished: " + messageStr);
+            
+            int commasFound = 0;
+            int j = 0;
+            char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-          currentXVelocity = xVelocity;
-          currentYVelocity = yVelocity;
+            for (int i = 13; i < maxSize && commasFound < 3; i++)
+            {
+              if (message[i] != ',')
+              {
+                if (commasFound == 0)
+                {
+                  pitchMessage[j] = message[i];
+                }
+                else if (commasFound == 2)
+                {
+                  rollMessage[j] = message[i];
+                }
 
-          newVelocityData = true;
+                j++;
+              }
+              else
+              {
+                j = 0;
+                commasFound++;
+              }
+            }
 
-          //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+            Pitch = String(pitchMessage).toFloat();
+            Roll = String(rollMessage).toFloat();
+
+            //Serial.println("Pitch: " + String(Pitch));
+            //Serial.println("Roll: " + String(Roll));
+
+
+
+
+            // int xVelocity = messageStr.substring(3, 9).toInt();
+            // int yVelocity = messageStr.substring(10, 16).toInt();
+
+            // currentXVelocity = xVelocity;
+            // currentYVelocity = yVelocity;
+
+            // newVelocityData = true;
+
+            //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
+          }
+          else if (message[6] == 'P' && message[7] == 'O' && message[11] == 'I' && message[12] == ',')
+          {
+            // $PIXSE,POSITI,x.xxxxxxxx,y.yyyyyyyy,z.zzz*hh<CR><LF>
+            //Serial.println(messageStr);
+            
+            int commasFound = 0;
+            int j = 0;
+            char latMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            char longMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            char altMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+            for (int i = 13; i < maxSize && commasFound < 3; i++)
+            {
+              if (message[i] != ',' && message[i] != '*')
+              {
+                if (commasFound == 0)
+                {
+                  latMessage[j] = message[i];
+                }
+                else if (commasFound == 1)
+                {
+                  longMessage[j] = message[i];
+                }
+                else if (commasFound == 2)
+                {
+                  altMessage[j] = message[i];
+                }
+
+                j++;
+              }
+              else
+              {
+                j = 0;
+                commasFound++;
+              }
+            }
+            // Pitch = String(pitchMessage).toFloat();
+            // Roll = String(rollMessage).toFloat();
+            Altitude = String(altMessage).toFloat();
+
+            //Serial.println("Pitch: " + String(Pitch));
+            //Serial.println("Roll: " + String(Roll));
+          }
         }
       }
       else if (!messageStarted)
