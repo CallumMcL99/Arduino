@@ -21,6 +21,8 @@ bool stationKeepingEnabled = false;
 bool newPosition = false;
 uint8_t yawMsb;
 uint8_t yawLsb;
+uint8_t verticalMsb;
+uint8_t verticalLsb;
 uint8_t foreMsb;
 uint8_t foreLsb;
 uint8_t latMsb;
@@ -29,7 +31,6 @@ uint8_t latLsb;
 // Data from RovIns
 double currentXVelocity;
 double currentYVelocity;
-double currentDepth;
 bool newVelocityData = false;
 
 // PID
@@ -50,7 +51,7 @@ IPAddress ip(192, 168, 36, 177);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
-int ports[2] { 8111, 8112 };
+int ports[3] { 8111, 8112, 8113 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
@@ -58,19 +59,21 @@ int ports[2] { 8111, 8112 };
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
 IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
-int connectionFailedCounters[2] = { 0, 0 };
-EthernetClient clients[2];
-bool EthernetConnecteds[2] = { false, false };
+int connectionFailedCounters[3] = { 0, 0, 0 };
+EthernetClient clients[3];
+bool EthernetConnecteds[3] = { false, false, false };
 
 // Attitude
 double Pitch = 0;
 double Roll = 0;
 double Heading = 0;
-double Depth = 0;
+double DistanceToBottom = 0;
 double Altitude = 0;
+double Depth;
 
 // Debug
 bool messageSent = false;
+bool printFunctionEntry = false;
 
 void setup() {
   Serial.begin(57600);
@@ -86,6 +89,8 @@ void setup() {
 }
 
 void InitialiseCanShield() {
+  if (printFunctionEntry) Serial.println("ENTER: InitialiseCanShield");
+
   Serial.println("CAN Shield Initialisation - START");
 
   while (CAN_OK != CAN.begin(CAN_500KBPS)){
@@ -97,6 +102,8 @@ void InitialiseCanShield() {
 }
 
 void InitialiseEthernetShield(){
+  if (printFunctionEntry) Serial.println("ENTER: InitialiseEthernetShield");
+
   // Start the Ethernet connection.
   Ethernet.begin(mac, ip);
 
@@ -118,29 +125,41 @@ void InitialiseEthernetShield(){
 }
 
 void loop() {
+  if (printFunctionEntry) Serial.println("ENTER: loop");
+  
   bool client0Connected = clients[0].connected();
 
   // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
   delay(100);
   bool client1Connected = clients[1].connected();
+  delay(100);
+  bool client2Connected = clients[2].connected();
 
-  if (client0Connected && client1Connected)
+  if (client0Connected && client1Connected && client2Connected)
   {
+    // TODO: Error checking with maintain();
+    Ethernet.maintain();
+
     HandleCanBus();
 
-    // Read messages as quickly as possible
-    //RovInsReadMessage_OctansStandard();
-    RovInsReadMessage_PhinsStandard();
-    HandleStationKeeping();
+    RovInsReadMessage_OctansStandard();
+    //RovInsReadMessage_PhinsStandard(); // Not needed.
+    RovInsReadMessage_RDIDP6();
+
+    ProcessDataAndReply();
   }
   else
   {
     HandleEthernetShieldConnection(0);
     HandleEthernetShieldConnection(1);
+    HandleEthernetShieldConnection(2);
   }
 }
 
 void HandleCanBus(){
+
+  if (printFunctionEntry) Serial.println("ENTER: HandleCanBus");
+
   ReadCanBusMessage();
   // if (CAN.checkError() != CAN_CTRLERROR) {
   //   ReadCanBusMessage();
@@ -156,26 +175,35 @@ void HandleCanBus(){
 }
 
 void ReadCanBusMessage() {
+  
+  if (printFunctionEntry) Serial.println("ENTER: ReadCanBusMessage");
+
   if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    
     uint8_t len = 0;
-    uint8_t buf[16];
+    while (CAN.checkReceive() == CAN_MSGAVAIL){
+      uint8_t buf[16];
 
-    CAN.readMsgBuf(&len, buf);
+      CAN.readMsgBuf(&len, buf);
 
-    uint32_t id = CAN.getCanId();
-    uint32_t command = id >> 8;
-    uint32_t address = id - (command << 8);
-
-    //PrintCanMessage(id, buf, len);
-
-    if (address == arduinoAddress) {
+      uint32_t id = CAN.getCanId();
+      uint32_t command = id >> 8;
+      uint32_t address = id - (command << 8);
 
       //PrintCanMessage(id, buf, len);
 
-      if (command == 0xFFAA) {
-        HandleSystemModeControlCommand(buf);
+      if (address == 9) {
+
+        //PrintCanMessage(id, buf, len);
+        if (command == 0xFF8E) {
+          HandleSystemModeControlCommand(buf);
+        }
+        else if (command == 0xFFFC)
+        {
+          HandleSystemMotionControlCommand(buf);
+        }
       }
-      else if (command == 0xFF9D)
+      else if (command == 0xFFE7 && address == 0 && buf[0] == 4)
       {
         HandlePidTuningCommand(buf);
       }
@@ -184,6 +212,8 @@ void ReadCanBusMessage() {
 }
 
 void HandleSystemModeControlCommand(uint8_t buf[]){
+  if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
+  
   if (buf[5] == 1 || buf[5] == 2) {
     bool newStationKeeping = buf[5] == 2;
 
@@ -194,6 +224,9 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
       if (stationKeepingEnabled) {     
         latitudePID = PID_v2(xKp, xKi, xKd, PID::Direct);
         longitudePID = PID_v2(yKp, yKi, yKd, PID::Direct);
+
+        latitudePID.SetOutputLimits(-1000, 1000);
+        longitudePID.SetOutputLimits(-1000, 1000);
 
         latitudePID.Start(0, 0, 0);
         longitudePID.Start(0, 0, 0);
@@ -211,21 +244,35 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
 }
 
 void HandlePidTuningCommand(uint8_t buf[]){
-  xKp = buf[0];
-  xKi = buf[1];
-  xKd = buf[2];
+  if (printFunctionEntry) Serial.println("ENTER: HandlePidTuningCommand");
+
+  xKp = buf[1];
+  xKi = buf[2];
+  xKd = buf[3];
   
-  yKp = buf[3];
-  yKi = buf[4];
-  yKd = buf[5];
+  yKp = xKp;
+  yKi = xKi;
+  yKd = xKd;
 
   latitudePID.SetTunings(xKp, xKi, xKd);
   longitudePID.SetTunings(yKp, yKi, yKd);
   
-  Serial.println("New tunings: p" + String(buf[0]) + ", i" + String(buf[1]) + ", d" + String(buf[2]));
+  Serial.println("New tunings: p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
+}
+
+void HandleSystemMotionControlCommand(uint8_t buf[]){
+  if (printFunctionEntry) Serial.println("ENTER: HandleSystemMotionControlCommand");
+  
+  verticalMsb = buf[2];
+  verticalLsb = buf[3];
+  yawMsb = buf[4];
+  yawLsb = buf[5];
+
 }
 
 void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
+  if (printFunctionEntry) Serial.println("ENTER: PrintCanMessage");
+
   uint32_t command = id >> 8;
   uint32_t address = id - (command << 8);
 
@@ -240,11 +287,15 @@ void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
 }
 
 void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
+  if (printFunctionEntry) Serial.println("ENTER: SendCanMessage");
+
   uint32_t fullId = (id << 8) + address;
   CAN.sendMsgBuf(fullId, 1, size, message);
 }
 
 void HandleEthernetShieldConnection(int index){
+  if (printFunctionEntry) Serial.println("ENTER: HandleEthernetShieldConnection");
+  
   if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF && connectionFailedCounters[index] < 20)
   {
     if (!clients[index].connected()){
@@ -279,7 +330,9 @@ void HandleEthernetShieldConnection(int index){
   }
 }
 
-void HandleStationKeeping(){
+void ProcessDataAndReply(){
+  if (printFunctionEntry) Serial.println("ENTER: HandleStationKeeping");
+
   unsigned long now = millis();
   if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
   {
@@ -289,8 +342,8 @@ void HandleStationKeeping(){
       HandlePidAndSendThrusterCommand();
     }
 
-    SendAttitudeMessage(Heading, Pitch, Roll);
-    SendDepthAltMessage(Depth, Altitude);
+    SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
+    SendDepthAltMessage(Depth * 100, Altitude * 10);
     SendHeartBeatMessage();
 
     if (!stationKeepingEnabled)
@@ -305,13 +358,13 @@ void HandleStationKeeping(){
 }
 
 void HandlePidAndSendThrusterCommand() {
+  if (printFunctionEntry) Serial.println("ENTER: HandlePidAndSendThrusterCommand");
+
   if (newVelocityData)
   {
     newVelocityData = false;
     xOutput = latitudePID.Run(currentXVelocity);
     yOutput = longitudePID.Run(currentYVelocity);
-
-    Serial.println("PID processed: X in " + String(currentXVelocity) + ", x out " + String(xOutput) + ".");
 
     SendThrusterCommand(yOutput, xOutput);
     messageSent = true;
@@ -319,6 +372,7 @@ void HandlePidAndSendThrusterCommand() {
 }
 
 void SendThrusterCommand(int forward, int lateral) {
+  if (printFunctionEntry) Serial.println("ENTER: SendThrusterCommand");
 
   int lateralMsb = lateral >> 8;
   int forwardMsb = forward >> 8;
@@ -333,23 +387,29 @@ void SendThrusterCommand(int forward, int lateral) {
     forwardMsb = 256 + forwardMsb;
   }
 
-  messageOne[0] = (byte)forwardMsb;//forward >> 8;    // Fore Msb
-  messageOne[1] = (byte)forward & 0xFF;  // Fore Lsb
-  messageOne[2] = 0;                     // Not used (vertical)
-  messageOne[3] = 0;                     // Not used (vertical)
-  messageOne[4] = 0;//yawMsb;
-  messageOne[5] = 0;//yawLsb;
-  messageOne[6] = (byte)lateralMsb;//(byte)lateral >> 8;    // Lateral Msb
-  messageOne[7] = (byte)lateral & 0xFF;  // Lateral Lsb
+  messageOne[0] = (byte)forwardMsb;
+  messageOne[1] = (byte)forward & 0xFF;
+  messageOne[2] = verticalMsb;
+  messageOne[3] = verticalLsb;
+  messageOne[4] = yawMsb;
+  messageOne[5] = yawLsb;
+  messageOne[6] = (byte)lateralMsb;
+  messageOne[7] = (byte)lateral & 0xFF;
 
-  //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
+  Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
   //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
   SendCanMessage(0xFFFC, 0, messageOne);
 }
 
+// Inputs expected from 0 to 3600 degrees
 void SendAttitudeMessage(int heading, int pitch, int roll){
+  if (printFunctionEntry) Serial.println("ENTER: SendAttitudeMessage");
+
+  //pitch -= 900;
+  //roll -= 900;
+
   int headingMsb = heading >> 8;
   int pitchMsb = pitch >> 8;
   int rollMsb = roll >> 8;
@@ -377,12 +437,13 @@ void SendAttitudeMessage(int heading, int pitch, int roll){
   messageOne[5] = (byte)roll & 0xFF;
   messageOne[6] = 0;
   messageOne[7] = 0;
-  
+
   //Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
   SendCanMessage(0xFFFF, 0, messageOne);
 }
 
 void SendDepthAltMessage(int depth, int alt){
+  if (printFunctionEntry) Serial.println("ENTER: SendDepthAltMessage");
 
   int depthMsb = depth >> 8;
   int altMsb = alt >> 8;
@@ -397,20 +458,22 @@ void SendDepthAltMessage(int depth, int alt){
     altMsb = 256 + altMsb;
   }
 
-  messageOne[0] = (byte)depthMsb;
-  messageOne[1] = (byte)depth & 0xFF;
-  messageOne[2] = (byte)altMsb;
-  messageOne[3] = (byte)alt & 0xFF;
+  messageOne[0] = (byte)depthMsb;       // depth msb
+  messageOne[1] = (byte)depth & 0xFF;   // depth lsb
+  messageOne[2] = (byte)altMsb;         // alt msb
+  messageOne[3] = (byte)alt & 0xFF;     // alt lsb
   messageOne[4] = 0;
   messageOne[5] = 0;
   messageOne[6] = 0;
-  messageOne[7] = 0;
+  messageOne[7] = 0;                    // depth 2 DP
   
   //Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
   SendCanMessage(0xFFFE, 0, messageOne);
 }
 
 void SendHeartBeatMessage(){
+  if (printFunctionEntry) Serial.println("ENTER: SendHeartBeatMessage");
+
     messageOne[0] = 0;
     messageOne[1] = 0;
     messageOne[2] = 0;
@@ -424,88 +487,140 @@ void SendHeartBeatMessage(){
 }
 
 void RovInsReadMessage_OctansStandard() {
-  if (clients[0].connected()){
+  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_OctansStandard");
 
-    // TODO: Error checking with maintain();
-    Ethernet.maintain();
+  if (clients[0].available()) {
 
-    if (clients[0].available()) {
-      bool messageStarted = false;
-      bool messageEnded = false;
-      const int maxSize = 100;
-      char message[maxSize];
-      int i = 0;
-      
-      while(clients[0].available() && !messageEnded && i < maxSize)
+    // Here there are 2 messages to search for:
+    // Heading - $HEHDT,4.55,T*1B
+    // Pitch/Roll - $PHTRO,7.44,P,14.22,B*71
+
+    bool foundHeadingMessage = false;
+    bool foundPitchAndRollMessage = false;
+    int counter = 0;
+    while (clients[0].available() && counter++ < 8 && (!foundHeadingMessage || !foundPitchAndRollMessage))
+    {
+      String message = clients[0].readStringUntil('\n');
+      //Serial.println(String(counter) + " - " + message);
+        
+      if (!foundHeadingMessage && message[3] == 'H' && message[4] == 'D' && message[5] == 'T')
       {
-        char c = clients[0].read();
-        if (messageStarted)
+        // Heading message.
+        // $HEHDT,4.55,T*1B
+
+        char headingMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        bool commaFound = false;
+        int j = 0;
+
+        for (int i = 7; i < message.length() && !commaFound; i++)
         {
-          if (c != '\n')
+          if (message[i] != ',')
           {
-            message[i++] = c;
+            headingMessage[j] = message[i];
+            j++;
           }
           else
           {
-            messageEnded = true;
+            commaFound = true;
           }
         }
-        else
-        {
-          if (c == '$')
-          {
-            messageStarted = true;
-          }
-        }
+
+        Heading = String(headingMessage).toFloat();
+        foundHeadingMessage = true;
+        //Serial.println("Heading: " + String(Heading));
       }
-
-      if (messageEnded)
+      else if (!foundPitchAndRollMessage && message[3] == 'T' && message[4] == 'R' && message[5] == 'O')
       {
-        String messageStr = String(message);
-        
-        if (message[0] == 'H' && message[1] == 'E' && message[4] == 'T' && message[5] == ',')
+        // Attitude message.
+        // $PHTRO,7.44,P,14.22,B*71
+
+        int commasFound = 0;
+        int j = 0;
+        char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        for (int i = 7; i < message.length() && commasFound < 3; i++)
         {
-          //HEHDT,4.55,T*1B
-          char headingMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-          bool commaFound = false;
-          int j = 0;
-          for (int i = 6; i < maxSize && !commaFound; i++)
+          if (message[i] != ',')
           {
-            if (message[i] != ',')
+            if (commasFound == 0)
             {
-              headingMessage[j] = message[i];
-              j++;
+              pitchMessage[j] = message[i];
             }
-            else
+            else if (commasFound == 2)
             {
-              commaFound = true;
+              rollMessage[j] = message[i];
             }
+
+            j++;
           }
-
-          Heading = String(headingMessage).toFloat();
-          //Serial.println("Heading: " + String(Heading));
+          else
+          {
+            j = 0;
+            commasFound++;
+          }
         }
-        else if (message[0] == 'P' && message[1] == 'H' && message[4] == 'O' && message[5] == ',')
-        {
-          //PHTRO,7.44,P,14.22,B*71
-          //Serial.println(messageStr);
 
+        Pitch = String(pitchMessage).toFloat();
+        Roll = String(rollMessage).toFloat();
+        foundPitchAndRollMessage = true;
+        //Serial.println("Pitch: " + String(Pitch));
+        //Serial.println("Roll: " + String(Roll));
+      }
+    }
+
+    // Clear the buffer.
+    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
+    while (clients[0].available())
+    {
+      //Serial.println("Cleaing buffer");
+      clients[0].readStringUntil('\n');
+    }
+  }
+}
+
+void RovInsReadMessage_PhinsStandard() {
+  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_PhinsStandard");
+
+  if (clients[1].available()) {
+
+    // Search for the following messages, with these unique characters
+    // $PIXSE,SPEED_,2.889,-4.202,-0.041*6B
+    // $PIXSE,POSITI,-23.36996014,317.41925983,8.862*73
+
+    bool speedMessageFound = false;
+    bool positionMessageFound = false;
+    int counter = 0;
+
+    while (clients[1].available() && counter++ < 10 && (!speedMessageFound || !positionMessageFound))
+    {
+      String message = clients[1].readStringUntil('$');
+      //Serial.print(String(counter) + " - " + message);
+      
+      if (message.length() > 12)
+      {
+        if (!speedMessageFound && message[8] == 'E'  && message[9] == 'E' && message[10] == 'D')
+        {
+          // SPEED - NOT IN USE
+          // 0123456789
+          // PIXSE,SPEED_,x.xxx,y.yyy,z.zzz*hh<CR><LF>
+          
           int commasFound = 0;
           int j = 0;
-          char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-          char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          char speedXMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          char speedYMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-          for (int i = 6; i < maxSize && commasFound < 3; i++)
+          for (int i = 14; i < message.length() && commasFound < 3; i++)
           {
             if (message[i] != ',')
             {
               if (commasFound == 0)
               {
-                pitchMessage[j] = message[i];
+                speedXMessage[j] = message[i];
               }
               else if (commasFound == 2)
               {
-                rollMessage[j] = message[i];
+                speedYMessage[j] = message[i];
               }
 
               j++;
@@ -517,172 +632,159 @@ void RovInsReadMessage_OctansStandard() {
             }
           }
 
-          Pitch = String(pitchMessage).toFloat();
-          Roll = String(rollMessage).toFloat();
+          speedMessageFound = true;
+          //currentXVelocity = String(speedXMessage).toFloat();
+          //currentYVelocity = String(speedYMessage).toFloat();
 
-          //Serial.println("Pitch: " + String(Pitch));
-          //Serial.println("Roll: " + String(Roll));
+          //Serial.println("X Velocity: " + String(currentXVelocity));
+          //Serial.println("Y Velocity: " + String(currentYVelocity));
+        }
+        else if (false && !positionMessageFound && message[9] == 'I' && message[10] == 'T' && message[11] == 'I')
+        {
+          // NOT IN USE.
+          // Position message.
+          // PIXSE,POSITI,x.xxxxxxxx,y.yyyyyyyy,z.zzz*hh<CR><LF>
+          
+          int commasFound = 0;
+          int j = 0;
+          //char latMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          //char longMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+          char altMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+          for (int i = 13; i < message.length() && commasFound < 3; i++)
+          {
+            if (message[i] != ',' && message[i] != '*')
+            {
+              if (commasFound == 0)
+              {
+                //latMessage[j] = message[i];
+              }
+              else if (commasFound == 1)
+              {
+                //longMessage[j] = message[i];
+              }
+              else if (commasFound == 2)
+              {
+                altMessage[j] = message[i];
+              }
+
+              j++;
+            }
+            else
+            {
+              j = 0;
+              commasFound++;
+            }
+          }
+          
+          positionMessageFound = true;
+          Altitude = String(altMessage).toFloat();
+
+          //Serial.println("Altitude: " + String(Altitude));
         }
       }
-      else if (!messageStarted)
-      {
-        //Serial.println("TCP message never started.");
-      }
-      else
-      {
-        //Serial.println("TCP message i: " + String(i));
-      }
+    }
+    // Clear the buffer.
+    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
+    int cleanCounter = 0;
+    while (clients[1].available())
+    {
+      cleanCounter++;
+      clients[1].readStringUntil('\n');
+    }
+
+    if (cleanCounter != 0)
+    {
+      //Serial.println("Cleaned buffer: " + String(cleanCounter));
     }
   }
 }
 
-void RovInsReadMessage_PhinsStandard() {
-  if (clients[1].connected()){
+void RovInsReadMessage_RDIDP6() {
+  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_RDIPD6");
 
-    // TODO: Error checking with maintain();
-    Ethernet.maintain();
+  if (clients[2].available()) {
 
-    if (clients[1].available()) {
-      const int maxSize = 100;
-      bool messageStarted = false;
-      bool messageEnded = false;
-      char message[maxSize];
-      int i = 0;
+    // Search for the following messages, with these unique characters
+    // $PIXSE,SPEED_,2.889,-4.202,-0.041*6B
+    // $PIXSE,POSITI,-23.36996014,317.41925983,8.862*73
 
-      while(clients[1].available() && !messageEnded && i < maxSize)
+    bool speedMessageFound = false;
+    bool bottomTrackMessage = false;
+    bool depthMessage = false;
+    int counter = 0;
+
+    while (clients[2].available() && counter++ < 10 && (!speedMessageFound || !bottomTrackMessage))
+    {
+      String message = clients[2].readStringUntil(':');
+      //Serial.println(String(counter) + " - " + message.length() + " - " + message);
+      
+      if (message.length() > 12)
       {
-        char c = clients[1].read();
-        if (messageStarted)
+        if (!speedMessageFound && message[0] == 'B'  && message[1] == 'I' && message[2] == ',')
         {
-          if (c != '\n')
+          // Speed message
+          // BI,±TTTTT,±LLLLL,±NNNNN,±MMMMM,S<CR><LF>
+
+          speedMessageFound = true;
+          newVelocityData = true;
+          currentXVelocity = message.substring(3, 9).toFloat();
+          currentYVelocity = message.substring(10, 16).toFloat();
+
+          // For PID the values must be clamped to this range.
+          if (currentXVelocity > 1023)
           {
-            message[i++] = c;
+            currentXVelocity = 1023;
           }
-          else
+          else if (currentXVelocity < -1023)
           {
-            messageEnded = true;
+            currentXVelocity = -1023;
           }
+          
+          if (currentYVelocity > 1023)
+          {
+            currentYVelocity = 1024;
+          }
+          else if (currentYVelocity < -1023)
+          {
+            currentYVelocity = -1023;
+          }
+
+          //Serial.println("X Velocity: " + String(currentXVelocity));
+          //Serial.println("Y Velocity: " + String(currentYVelocity));
         }
-        else
+        else if (!bottomTrackMessage && message[0] == 'B' && message[1] == 'D' && message[2] == ',')
         {
-          if (c == '$')
-          {
-            messageStarted = true;
-          }
+          // Bottom track message.
+          // BD,±EEEEEEEE.EE,±NNNNNNNN.NN,±UUUUUUUU.UU,DDDD.DD,TTT.TT <CR><LF>
+          
+          bottomTrackMessage = true;
+          DistanceToBottom = message.substring(42, 49).toFloat();
+
+          //Serial.println("Depth: " + String(Depth));
         }
-      }
-
-      if (messageEnded)
-      {
-        String messageStr = String(message);
-
-        if (message[0] == 'P' && message[1] == 'I' && message[4] == 'E' && message[5] == ',')
+        else if (!depthMessage && message[0] == 'T' && message[1] == 'S' && message[2] == ',')
         {
-          if (message[6] == 'S' && message[7] == 'P' && message[10] == 'D' && message[11] == '_')
-          {
-            //$PIXSE,SPEED_,x.xxx,y.yyy,z.zzz*hh<CR><LF>
-            //Serial.println(messageStr);
-            //Serial.println("TCP message finished: " + messageStr);
-            
-            int commasFound = 0;
-            int j = 0;
-            char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-            for (int i = 13; i < maxSize && commasFound < 3; i++)
-            {
-              if (message[i] != ',')
-              {
-                if (commasFound == 0)
-                {
-                  pitchMessage[j] = message[i];
-                }
-                else if (commasFound == 2)
-                {
-                  rollMessage[j] = message[i];
-                }
-
-                j++;
-              }
-              else
-              {
-                j = 0;
-                commasFound++;
-              }
-            }
-
-            Pitch = String(pitchMessage).toFloat();
-            Roll = String(rollMessage).toFloat();
-
-            //Serial.println("Pitch: " + String(Pitch));
-            //Serial.println("Roll: " + String(Roll));
-
-
-
-
-            // int xVelocity = messageStr.substring(3, 9).toInt();
-            // int yVelocity = messageStr.substring(10, 16).toInt();
-
-            // currentXVelocity = xVelocity;
-            // currentYVelocity = yVelocity;
-
-            // newVelocityData = true;
-
-            //Serial.println("TCP Data: " + String(xVelocity) + "x, " + String(yVelocity) + "y.");
-          }
-          else if (message[6] == 'P' && message[7] == 'O' && message[11] == 'I' && message[12] == ',')
-          {
-            // $PIXSE,POSITI,x.xxxxxxxx,y.yyyyyyyy,z.zzz*hh<CR><LF>
-            //Serial.println(messageStr);
-            
-            int commasFound = 0;
-            int j = 0;
-            char latMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            char longMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            char altMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-            for (int i = 13; i < maxSize && commasFound < 3; i++)
-            {
-              if (message[i] != ',' && message[i] != '*')
-              {
-                if (commasFound == 0)
-                {
-                  latMessage[j] = message[i];
-                }
-                else if (commasFound == 1)
-                {
-                  longMessage[j] = message[i];
-                }
-                else if (commasFound == 2)
-                {
-                  altMessage[j] = message[i];
-                }
-
-                j++;
-              }
-              else
-              {
-                j = 0;
-                commasFound++;
-              }
-            }
-            // Pitch = String(pitchMessage).toFloat();
-            // Roll = String(rollMessage).toFloat();
-            Altitude = String(altMessage).toFloat();
-
-            //Serial.println("Pitch: " + String(Pitch));
-            //Serial.println("Roll: " + String(Roll));
-          }
+          // Depth message.
+          depthMessage = true;
+          Depth = message.substring(30, 35).toFloat();
+          //Serial.println(String(Depth));
         }
       }
-      else if (!messageStarted)
-      {
-        //Serial.println("TCP message never started.");
-      }
-      else
-      {
-        //Serial.println("TCP message i: " + String(i));
-      }
+    }
+    
+    // Clear the buffer.
+    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
+    int cleanCounter = 0;
+    while (clients[2].available())
+    {
+      cleanCounter++;
+      clients[2].readStringUntil('\n');
+    }
+
+    if (cleanCounter != 0)
+    {
+      //Serial.println("Cleaned buffer: " + String(cleanCounter));
     }
   }
 }
