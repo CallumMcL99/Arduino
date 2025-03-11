@@ -51,7 +51,7 @@ IPAddress ip(192, 168, 36, 177);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
-int ports[3] { 8111, 8112, 8113 };
+int ports[2] { 8111, 8113 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
@@ -59,9 +59,11 @@ int ports[3] { 8111, 8112, 8113 };
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
 IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
-int connectionFailedCounters[3] = { 0, 0, 0 };
-EthernetClient clients[3];
-bool EthernetConnecteds[3] = { false, false, false };
+int connectionFailedCounters[2] = { 0, 0 };
+EthernetClient clients[2];
+bool EthernetConnecteds[2] = { false, false };
+const int clientOctansStandardId = 0;
+const int clientRdiPd6Id = 1;
 
 // Attitude
 double Pitch = 0;
@@ -70,9 +72,9 @@ double Heading = 0;
 double DistanceToBottom = 0;
 double Altitude = 0;
 double Depth;
+int pidRecievedCounter = 0;
 
 // Debug
-bool messageSent = false;
 bool printFunctionEntry = false;
 
 void setup() {
@@ -132,19 +134,17 @@ void loop() {
   // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
   delay(100);
   bool client1Connected = clients[1].connected();
-  delay(100);
-  bool client2Connected = clients[2].connected();
 
-  if (client0Connected && client1Connected && client2Connected)
+  if (client0Connected && client1Connected)
   {
     // TODO: Error checking with maintain();
     Ethernet.maintain();
 
-    HandleCanBus();
-
+    ReadCanBusMessages();
     RovInsReadMessage_OctansStandard();
-    //RovInsReadMessage_PhinsStandard(); // Not needed.
+    ReadCanBusMessages();
     RovInsReadMessage_RDIDP6();
+    ReadCanBusMessages();
 
     ProcessDataAndReply();
   }
@@ -152,15 +152,13 @@ void loop() {
   {
     HandleEthernetShieldConnection(0);
     HandleEthernetShieldConnection(1);
-    HandleEthernetShieldConnection(2);
   }
 }
 
 void HandleCanBus(){
-
   if (printFunctionEntry) Serial.println("ENTER: HandleCanBus");
 
-  ReadCanBusMessage();
+  ReadCanBusMessages();
   // if (CAN.checkError() != CAN_CTRLERROR) {
   //   ReadCanBusMessage();
   // } else {
@@ -174,8 +172,10 @@ void HandleCanBus(){
   // }
 }
 
-void ReadCanBusMessage() {
-  
+// I don't think Can Bus messages are queued, you just have to read at the correct time
+// In an attemp to lose as few messages as possible, this function is called very frequently.
+// Call it multiple times in the loop, and since any lengthly while loops.
+void ReadCanBusMessages() {
   if (printFunctionEntry) Serial.println("ENTER: ReadCanBusMessage");
 
   if (CAN_MSGAVAIL == CAN.checkReceive()) {
@@ -195,12 +195,12 @@ void ReadCanBusMessage() {
       if (address == 9) {
 
         //PrintCanMessage(id, buf, len);
-        if (command == 0xFF8E) {
-          HandleSystemModeControlCommand(buf);
-        }
-        else if (command == 0xFFFC)
+         if (command == 0xFFFC)
         {
           HandleSystemMotionControlCommand(buf);
+        }
+        else if (command == 0xFF8E) {
+          HandleSystemModeControlCommand(buf);
         }
       }
       else if (command == 0xFFE7 && address == 0 && buf[0] == 4)
@@ -250,6 +250,8 @@ void HandlePidTuningCommand(uint8_t buf[]){
   xKi = buf[2];
   xKd = buf[3];
   
+  pidRecievedCounter = buf[4];
+
   yKp = xKp;
   yKi = xKi;
   yKd = xKd;
@@ -268,6 +270,8 @@ void HandleSystemMotionControlCommand(uint8_t buf[]){
   yawMsb = buf[4];
   yawLsb = buf[5];
 
+  Serial.println("Recv Yaw: " + String(yawMsb) + "." + String(yawLsb));
+  SendThrusterCommand(yOutput, xOutput);
 }
 
 void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
@@ -332,28 +336,18 @@ void HandleEthernetShieldConnection(int index){
 
 void ProcessDataAndReply(){
   if (printFunctionEntry) Serial.println("ENTER: HandleStationKeeping");
+    
+  if (stationKeepingEnabled) {
+    HandlePidAndSendThrusterCommand();
+  }
 
   unsigned long now = millis();
   if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
   {
     lastMessageSent = now;
-    
-    if (stationKeepingEnabled) {
-      HandlePidAndSendThrusterCommand();
-    }
-
     SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
     SendDepthAltMessage(Depth * 100, Altitude * 10);
     SendHeartBeatMessage();
-
-    if (!stationKeepingEnabled)
-    {
-      //Serial.println("Heartbeat: " + String(stationKeepingEnabled));
-    }
-    else
-    {
-      //Serial.println("Heartbeat: " + String(stationKeepingEnabled) + ". X: " + String(xOutput) + ". Y: " + String(yOutput));
-    }
   }
 }
 
@@ -365,10 +359,10 @@ void HandlePidAndSendThrusterCommand() {
     newVelocityData = false;
     xOutput = latitudePID.Run(currentXVelocity);
     yOutput = longitudePID.Run(currentYVelocity);
-
-    SendThrusterCommand(yOutput, xOutput);
-    messageSent = true;
   }
+
+  // Send data even if no new velocity data was found so the yaw & vertical joystick commands can be sent.
+  SendThrusterCommand(yOutput, xOutput);
 }
 
 void SendThrusterCommand(int forward, int lateral) {
@@ -396,7 +390,8 @@ void SendThrusterCommand(int forward, int lateral) {
   messageOne[6] = (byte)lateralMsb;
   messageOne[7] = (byte)lateral & 0xFF;
 
-  Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
+  //Serial.println("            Sent Yaw: " + String(yawMsb) + "." + String(yawLsb));
+  //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
   //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
@@ -480,7 +475,7 @@ void SendHeartBeatMessage(){
     messageOne[3] = 0;
     messageOne[4] = 0;
     messageOne[5] = stationKeepingEnabled ? 2 : 1;
-    messageOne[6] = 0;
+    messageOne[6] = pidRecievedCounter;
     messageOne[7] = 0;
 
     SendCanMessage(0xFF8F, 9, messageOne);
@@ -489,7 +484,7 @@ void SendHeartBeatMessage(){
 void RovInsReadMessage_OctansStandard() {
   if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_OctansStandard");
 
-  if (clients[0].available()) {
+  if (clients[clientOctansStandardId].available()) {
 
     // Here there are 2 messages to search for:
     // Heading - $HEHDT,4.55,T*1B
@@ -498,9 +493,9 @@ void RovInsReadMessage_OctansStandard() {
     bool foundHeadingMessage = false;
     bool foundPitchAndRollMessage = false;
     int counter = 0;
-    while (clients[0].available() && counter++ < 8 && (!foundHeadingMessage || !foundPitchAndRollMessage))
+    while (clients[clientOctansStandardId].available() && counter++ < 8 && (!foundHeadingMessage || !foundPitchAndRollMessage))
     {
-      String message = clients[0].readStringUntil('\n');
+      String message = clients[clientOctansStandardId].readStringUntil('\n');
       //Serial.println(String(counter) + " - " + message);
         
       if (!foundHeadingMessage && message[3] == 'H' && message[4] == 'D' && message[5] == 'T')
@@ -567,135 +562,16 @@ void RovInsReadMessage_OctansStandard() {
         //Serial.println("Pitch: " + String(Pitch));
         //Serial.println("Roll: " + String(Roll));
       }
+
+      ReadCanBusMessages();
     }
 
     // Clear the buffer.
     // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
-    while (clients[0].available())
+    while (clients[clientOctansStandardId].available())
     {
       //Serial.println("Cleaing buffer");
-      clients[0].readStringUntil('\n');
-    }
-  }
-}
-
-void RovInsReadMessage_PhinsStandard() {
-  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_PhinsStandard");
-
-  if (clients[1].available()) {
-
-    // Search for the following messages, with these unique characters
-    // $PIXSE,SPEED_,2.889,-4.202,-0.041*6B
-    // $PIXSE,POSITI,-23.36996014,317.41925983,8.862*73
-
-    bool speedMessageFound = false;
-    bool positionMessageFound = false;
-    int counter = 0;
-
-    while (clients[1].available() && counter++ < 10 && (!speedMessageFound || !positionMessageFound))
-    {
-      String message = clients[1].readStringUntil('$');
-      //Serial.print(String(counter) + " - " + message);
-      
-      if (message.length() > 12)
-      {
-        if (!speedMessageFound && message[8] == 'E'  && message[9] == 'E' && message[10] == 'D')
-        {
-          // SPEED - NOT IN USE
-          // 0123456789
-          // PIXSE,SPEED_,x.xxx,y.yyy,z.zzz*hh<CR><LF>
-          
-          int commasFound = 0;
-          int j = 0;
-          char speedXMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-          char speedYMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-          for (int i = 14; i < message.length() && commasFound < 3; i++)
-          {
-            if (message[i] != ',')
-            {
-              if (commasFound == 0)
-              {
-                speedXMessage[j] = message[i];
-              }
-              else if (commasFound == 2)
-              {
-                speedYMessage[j] = message[i];
-              }
-
-              j++;
-            }
-            else
-            {
-              j = 0;
-              commasFound++;
-            }
-          }
-
-          speedMessageFound = true;
-          //currentXVelocity = String(speedXMessage).toFloat();
-          //currentYVelocity = String(speedYMessage).toFloat();
-
-          //Serial.println("X Velocity: " + String(currentXVelocity));
-          //Serial.println("Y Velocity: " + String(currentYVelocity));
-        }
-        else if (false && !positionMessageFound && message[9] == 'I' && message[10] == 'T' && message[11] == 'I')
-        {
-          // NOT IN USE.
-          // Position message.
-          // PIXSE,POSITI,x.xxxxxxxx,y.yyyyyyyy,z.zzz*hh<CR><LF>
-          
-          int commasFound = 0;
-          int j = 0;
-          //char latMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-          //char longMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-          char altMessage[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-          for (int i = 13; i < message.length() && commasFound < 3; i++)
-          {
-            if (message[i] != ',' && message[i] != '*')
-            {
-              if (commasFound == 0)
-              {
-                //latMessage[j] = message[i];
-              }
-              else if (commasFound == 1)
-              {
-                //longMessage[j] = message[i];
-              }
-              else if (commasFound == 2)
-              {
-                altMessage[j] = message[i];
-              }
-
-              j++;
-            }
-            else
-            {
-              j = 0;
-              commasFound++;
-            }
-          }
-          
-          positionMessageFound = true;
-          Altitude = String(altMessage).toFloat();
-
-          //Serial.println("Altitude: " + String(Altitude));
-        }
-      }
-    }
-    // Clear the buffer.
-    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
-    int cleanCounter = 0;
-    while (clients[1].available())
-    {
-      cleanCounter++;
-      clients[1].readStringUntil('\n');
-    }
-
-    if (cleanCounter != 0)
-    {
-      //Serial.println("Cleaned buffer: " + String(cleanCounter));
+      clients[clientOctansStandardId].readStringUntil('\n');
     }
   }
 }
@@ -703,20 +579,20 @@ void RovInsReadMessage_PhinsStandard() {
 void RovInsReadMessage_RDIDP6() {
   if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_RDIPD6");
 
-  if (clients[2].available()) {
+  if (clients[clientRdiPd6Id].available()) {
 
     // Search for the following messages, with these unique characters
     // $PIXSE,SPEED_,2.889,-4.202,-0.041*6B
     // $PIXSE,POSITI,-23.36996014,317.41925983,8.862*73
 
     bool speedMessageFound = false;
-    bool bottomTrackMessage = false;
+    bool altitudeMessage = false;
     bool depthMessage = false;
     int counter = 0;
 
-    while (clients[2].available() && counter++ < 10 && (!speedMessageFound || !bottomTrackMessage))
+    while (clients[clientRdiPd6Id].available() && counter++ < 10 && (!speedMessageFound || !altitudeMessage))
     {
-      String message = clients[2].readStringUntil(':');
+      String message = clients[clientRdiPd6Id].readStringUntil(':');
       //Serial.println(String(counter) + " - " + message.length() + " - " + message);
       
       if (message.length() > 12)
@@ -753,13 +629,13 @@ void RovInsReadMessage_RDIDP6() {
           //Serial.println("X Velocity: " + String(currentXVelocity));
           //Serial.println("Y Velocity: " + String(currentYVelocity));
         }
-        else if (!bottomTrackMessage && message[0] == 'B' && message[1] == 'D' && message[2] == ',')
+        else if (!altitudeMessage && message[0] == 'B' && message[1] == 'D' && message[2] == ',')
         {
           // Bottom track message.
           // BD,±EEEEEEEE.EE,±NNNNNNNN.NN,±UUUUUUUU.UU,DDDD.DD,TTT.TT <CR><LF>
           
-          bottomTrackMessage = true;
-          DistanceToBottom = message.substring(42, 49).toFloat();
+          altitudeMessage = true;
+          Altitude = message.substring(42, 49).toFloat();
 
           //Serial.println("Depth: " + String(Depth));
         }
@@ -771,15 +647,17 @@ void RovInsReadMessage_RDIDP6() {
           //Serial.println(String(Depth));
         }
       }
+
+      ReadCanBusMessages();
     }
     
     // Clear the buffer.
     // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
     int cleanCounter = 0;
-    while (clients[2].available())
+    while (clients[clientRdiPd6Id].available())
     {
       cleanCounter++;
-      clients[2].readStringUntil('\n');
+      clients[clientRdiPd6Id].readStringUntil('\n');
     }
 
     if (cleanCounter != 0)
