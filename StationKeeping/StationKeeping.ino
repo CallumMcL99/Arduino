@@ -1,3 +1,7 @@
+/// ROV INS Arduino code. Version 1.0.0.
+/// This handles communication with the RovIns and CAN BUS communication.
+///
+
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
 #include <SPI.h>
@@ -79,15 +83,20 @@ bool printFunctionEntry = false;
 
 void setup() {
   Serial.begin(57600);
-  while (!Serial) ;
+
+  // Only use this while debugging. This waits for a serial (USB) connection.
+  //while (!Serial) ;
 
   Serial.println("Serial initialisation - COMPLETE");
 
   InitialiseCanShield();
+
+  Serial.println("VERSION 1.0.0");
   InitialiseEthernetShield();
 
   latitudePID.SetOutputLimits(-1000, 1000);
   longitudePID.SetOutputLimits(-1000, 1000);
+
 }
 
 void InitialiseCanShield() {
@@ -129,29 +138,33 @@ void InitialiseEthernetShield(){
 void loop() {
   if (printFunctionEntry) Serial.println("ENTER: loop");
   
-  bool client0Connected = clients[0].connected();
-
-  // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
-  delay(100);
-  bool client1Connected = clients[1].connected();
-
-  if (client0Connected && client1Connected)
+  if (Ethernet.linkStatus() != LinkOFF)
   {
-    // TODO: Error checking with maintain();
-    Ethernet.maintain();
+    delay(100);
+    bool client0Connected = clients[0].connected();
 
-    ReadCanBusMessages();
-    RovInsReadMessage_OctansStandard();
-    ReadCanBusMessages();
-    RovInsReadMessage_RDIDP6();
-    ReadCanBusMessages();
+    // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
+    delay(100);
+    bool client1Connected = clients[1].connected();
 
-    ProcessDataAndReply();
-  }
-  else
-  {
-    HandleEthernetShieldConnection(0);
-    HandleEthernetShieldConnection(1);
+    if (client0Connected && client1Connected)
+    {
+      // TODO: Error checking with maintain();
+      Ethernet.maintain();
+
+      ReadCanBusMessages();
+      RovInsReadMessage_OctansStandard();
+      ReadCanBusMessages();
+      RovInsReadMessage_RDIDP6();
+      ReadCanBusMessages();
+
+      ProcessDataAndReply();
+    }
+    else
+    {
+      HandleEthernetShieldConnection(0);
+      HandleEthernetShieldConnection(1);
+    }
   }
 }
 
@@ -300,7 +313,7 @@ void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
 void HandleEthernetShieldConnection(int index){
   if (printFunctionEntry) Serial.println("ENTER: HandleEthernetShieldConnection");
   
-  if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF && connectionFailedCounters[index] < 20)
+  if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF)// && connectionFailedCounters[index] < 20)
   {
     if (!clients[index].connected()){
 
@@ -346,7 +359,7 @@ void ProcessDataAndReply(){
   {
     lastMessageSent = now;
     SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
-    SendDepthAltMessage(Depth * 100, Altitude * 10);
+    SendDepthAltMessage(Depth * 100, Altitude * 100);
     SendHeartBeatMessage();
   }
 }
@@ -391,7 +404,7 @@ void SendThrusterCommand(int forward, int lateral) {
   messageOne[7] = (byte)lateral & 0xFF;
 
   //Serial.println("            Sent Yaw: " + String(yawMsb) + "." + String(yawLsb));
-  //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
+  Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
   //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
@@ -433,7 +446,7 @@ void SendAttitudeMessage(int heading, int pitch, int roll){
   messageOne[6] = 0;
   messageOne[7] = 0;
 
-  //Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
+  Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
   SendCanMessage(0xFFFF, 0, messageOne);
 }
 
@@ -462,7 +475,9 @@ void SendDepthAltMessage(int depth, int alt){
   messageOne[6] = 0;
   messageOne[7] = 0;                    // depth 2 DP
   
-  //Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+  Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+
+  // Set the board select to 0 if not usuing an additional depth sensor, set to 9 otherwise.
   SendCanMessage(0xFFFE, 0, messageOne);
 }
 
