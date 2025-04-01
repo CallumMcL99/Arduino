@@ -1,6 +1,6 @@
-/// ROV INS Arduino code. Version 1.0.0.
+/// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-///
+const String VERSION = " v1.0.1";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -10,6 +10,7 @@
 
 // CAN-BUS
 const int SPI_CS_PIN = 9;
+const int CAN_INT_PIN = 2;
 DFRobot_MCP2515 CAN(SPI_CS_PIN);
 const int arduinoAddress = 9;
 int canErrorCount = 0;
@@ -21,27 +22,27 @@ unsigned long lastMessageSent = 0;
 const unsigned long delayBetweenSendingMessagesMs = 100;
 
 // Station keeping
-bool stationKeepingEnabled = false;
-bool newPosition = false;
-uint8_t yawMsb;
-uint8_t yawLsb;
-uint8_t verticalMsb;
-uint8_t verticalLsb;
-uint8_t foreMsb;
-uint8_t foreLsb;
-uint8_t latMsb;
-uint8_t latLsb;
+volatile bool stationKeepingEnabled = false;
+volatile bool newPosition = false;
+volatile uint8_t yawMsb;
+volatile uint8_t yawLsb;
+volatile uint8_t verticalMsb;
+volatile uint8_t verticalLsb;
+volatile uint8_t foreMsb;
+volatile uint8_t foreLsb;
+volatile uint8_t latMsb;
+volatile uint8_t latLsb;
 
 // Data from RovIns
-double currentXVelocity;
-double currentYVelocity;
-bool newVelocityData = false;
+volatile double currentXVelocity;
+volatile double currentYVelocity;
+volatile bool newVelocityData = false;
 
 // PID
 //Define Variables we'll be connecting to
-double xOutput, yOutput;
-double xKp = 2, xKi = 5, xKd = 1;
-double yKp = 2, yKi = 5, yKd = 1;
+volatile double xOutput, yOutput;
+volatile double xKp = 2, xKi = 5, xKd = 1;
+volatile double yKp = 2, yKi = 5, yKd = 1;
 PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct); //X
 PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct); //Y
 
@@ -70,13 +71,13 @@ const int clientOctansStandardId = 0;
 const int clientRdiPd6Id = 1;
 
 // Attitude
-double Pitch = 0;
-double Roll = 0;
-double Heading = 0;
-double DistanceToBottom = 0;
-double Altitude = 0;
-double Depth;
-int pidRecievedCounter = 0;
+volatile double Pitch = 0;
+volatile double Roll = 0;
+volatile double Heading = 0;
+volatile double DistanceToBottom = 0;
+volatile double Altitude = 0;
+volatile double Depth;
+volatile int pidRecievedCounter = 0;
 
 // Debug
 bool printFunctionEntry = false;
@@ -91,12 +92,14 @@ void setup() {
 
   InitialiseCanShield();
 
-  Serial.println("VERSION 1.0.0");
+  Serial.println(VERSION);
   InitialiseEthernetShield();
 
   latitudePID.SetOutputLimits(-1000, 1000);
   longitudePID.SetOutputLimits(-1000, 1000);
 
+  // Set the function to be called when the CAN Bus recieved a message.
+  attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, FALLING);
 }
 
 void InitialiseCanShield() {
@@ -152,11 +155,9 @@ void loop() {
       // TODO: Error checking with maintain();
       Ethernet.maintain();
 
-      ReadCanBusMessages();
+      // ReadCanBusMessages();
       RovInsReadMessage_OctansStandard();
-      ReadCanBusMessages();
       RovInsReadMessage_RDIDP6();
-      ReadCanBusMessages();
 
       ProcessDataAndReply();
     }
@@ -166,31 +167,27 @@ void loop() {
       HandleEthernetShieldConnection(1);
     }
   }
+
+  Serial.print(VERSION);
 }
 
-void HandleCanBus(){
-  if (printFunctionEntry) Serial.println("ENTER: HandleCanBus");
+bool InInterupt = false;
 
-  ReadCanBusMessages();
-  // if (CAN.checkError() != CAN_CTRLERROR) {
-  //   ReadCanBusMessage();
-  // } else {
-  //   Serial.println("Can bus RT - Error " + String(canErrorCount));
-  //   canErrorCount++;
-
-  //   if (canErrorCount > 30) {
-  //     canErrorCount = 0;
-  //     InitialiseCanShield();
-  //   }
-  // }
+// This function is called whenever the CAN Bus recieved a message.
+// You cannot print with Serial while inside an interupt function.
+void CanBusInterupt() {
+  if (!InInterupt)
+  {
+    InInterupt = true;
+    ReadCanBusMessages();
+    InInterupt = false;
+  }
 }
 
 // I don't think Can Bus messages are queued, you just have to read at the correct time
 // In an attemp to lose as few messages as possible, this function is called very frequently.
 // Call it multiple times in the loop, and since any lengthly while loops.
 void ReadCanBusMessages() {
-  if (printFunctionEntry) Serial.println("ENTER: ReadCanBusMessage");
-
   if (CAN_MSGAVAIL == CAN.checkReceive()) {
     
     uint8_t len = 0;
@@ -203,11 +200,7 @@ void ReadCanBusMessages() {
       uint32_t command = id >> 8;
       uint32_t address = id - (command << 8);
 
-      //PrintCanMessage(id, buf, len);
-
       if (address == 9) {
-
-        //PrintCanMessage(id, buf, len);
          if (command == 0xFFFC)
         {
           HandleSystemMotionControlCommand(buf);
@@ -225,7 +218,7 @@ void ReadCanBusMessages() {
 }
 
 void HandleSystemModeControlCommand(uint8_t buf[]){
-  if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
+  // if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
   
   if (buf[5] == 1 || buf[5] == 2) {
     bool newStationKeeping = buf[5] == 2;
@@ -415,9 +408,6 @@ void SendThrusterCommand(int forward, int lateral) {
 void SendAttitudeMessage(int heading, int pitch, int roll){
   if (printFunctionEntry) Serial.println("ENTER: SendAttitudeMessage");
 
-  //pitch -= 900;
-  //roll -= 900;
-
   int headingMsb = heading >> 8;
   int pitchMsb = pitch >> 8;
   int rollMsb = roll >> 8;
@@ -577,8 +567,6 @@ void RovInsReadMessage_OctansStandard() {
         //Serial.println("Pitch: " + String(Pitch));
         //Serial.println("Roll: " + String(Roll));
       }
-
-      ReadCanBusMessages();
     }
 
     // Clear the buffer.
@@ -662,8 +650,6 @@ void RovInsReadMessage_RDIDP6() {
           //Serial.println(String(Depth));
         }
       }
-
-      ReadCanBusMessages();
     }
     
     // Clear the buffer.
