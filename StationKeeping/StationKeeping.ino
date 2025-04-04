@@ -1,6 +1,6 @@
 /// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-const String VERSION = " v1.0.1";
+const String VERSION = " v1.0.2.1";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -14,11 +14,24 @@ const int CAN_INT_PIN = 2;
 DFRobot_MCP2515 CAN(SPI_CS_PIN);
 const int arduinoAddress = 9;
 int canErrorCount = 0;
+volatile byte canMessageCounter = 0;
+volatile bool canInterupt = true;
+
+// Messages sent in the Heartbeat message to indicate what code is running.
+const int InitialiseMessage_EthernetBegin = 1;
+const int InitialiseMessage_EthernetCheckingForShield = 2;
+const int InitialiseMessage_EthernetCheckingForCable = 3;
+const int InitialiseMessage_EthernetFinished = 4;
+const int InitialiseMessage_PidLimitsSet = 5;
+const int InitialiseMessage_Complete = 6;
+const int RunTimeMessage_Running = 7;
 
 // Message Out
 const int size = 8;
 uint8_t messageOne[size] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 unsigned long lastMessageSent = 0;
+volatile unsigned long lastHeadingRecieved = 0;
+volatile unsigned long lastDvlMessageRecieved = 0;
 const unsigned long delayBetweenSendingMessagesMs = 100;
 
 // Station keeping
@@ -70,7 +83,7 @@ bool EthernetConnecteds[2] = { false, false };
 const int clientOctansStandardId = 0;
 const int clientRdiPd6Id = 1;
 
-// Attitude
+// RovIns Info
 volatile double Pitch = 0;
 volatile double Roll = 0;
 volatile double Heading = 0;
@@ -78,6 +91,11 @@ volatile double DistanceToBottom = 0;
 volatile double Altitude = 0;
 volatile double Depth;
 volatile int pidRecievedCounter = 0;
+
+volatile bool RovInsReady = false; // The RovIns required time to initialise once powered on (5 mins), before hand it will send Pitch & Roll but not Heading.
+volatile bool DvlReady = false; // The DVL won't send data if it's too close to the floor (50cm).
+volatile bool SendAttitude = false;
+volatile bool SendDepth = false;
 
 // Debug
 bool printFunctionEntry = false;
@@ -98,8 +116,16 @@ void setup() {
   latitudePID.SetOutputLimits(-1000, 1000);
   longitudePID.SetOutputLimits(-1000, 1000);
 
+  SendHeartBeatMessage(InitialiseMessage_PidLimitsSet, 0);
+
   // Set the function to be called when the CAN Bus recieved a message.
-  attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, FALLING);
+  pinMode(CAN_INT_PIN, INPUT);
+  pinMode(CAN_INT_PIN, INPUT_PULLUP); // Not needed?
+  attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, CHANGE);
+
+  SendHeartBeatMessage(InitialiseMessage_Complete, 0);
+  
+  Serial.println("Running " + VERSION);
 }
 
 void InitialiseCanShield() {
@@ -118,8 +144,11 @@ void InitialiseCanShield() {
 void InitialiseEthernetShield(){
   if (printFunctionEntry) Serial.println("ENTER: InitialiseEthernetShield");
 
+  SendHeartBeatMessage(InitialiseMessage_EthernetBegin, 0);
   // Start the Ethernet connection.
   Ethernet.begin(mac, ip);
+
+  SendHeartBeatMessage(InitialiseMessage_EthernetCheckingForShield, 0);
 
   // Check for Ethernet hardware present.
   while (Ethernet.hardwareStatus() == EthernetNoHardware) {
@@ -127,10 +156,13 @@ void InitialiseEthernetShield(){
     delay(500);
   }
 
+  SendHeartBeatMessage(InitialiseMessage_EthernetCheckingForCable, 0);
   while (Ethernet.linkStatus() == LinkOFF) {
-    Serial.println("Ethernet Shield Initialisation - ERROR - cable is not connected.");
+    Serial.println("Ethernet Shield Initialisation - ERROR - cable is not connected x.");
     delay(500);
   }
+
+  SendHeartBeatMessage(InitialiseMessage_EthernetFinished, 0);
 
   // Give the Ethernet shield a second to initialize.
   delay(1000);
@@ -141,34 +173,73 @@ void InitialiseEthernetShield(){
 void loop() {
   if (printFunctionEntry) Serial.println("ENTER: loop");
   
+  bool tick = false; 
+  unsigned long now = millis();
+  if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
+  {
+    lastMessageSent = now;
+    tick = true;
+  }
+
+  bool client0Connected, client1Connected;
   if (Ethernet.linkStatus() != LinkOFF)
   {
     delay(100);
-    bool client0Connected = clients[0].connected();
+    client0Connected = clients[0].connected();
 
     // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
     delay(100);
-    bool client1Connected = clients[1].connected();
+    client1Connected = clients[1].connected();
 
+    // The interupt flag seems to get stuck, but calling this sorts that out.
+    ReadCanBusMessages();
+    
     if (client0Connected && client1Connected)
     {
       // TODO: Error checking with maintain();
       Ethernet.maintain();
 
-      // ReadCanBusMessages();
       RovInsReadMessage_OctansStandard();
       RovInsReadMessage_RDIDP6();
 
-      ProcessDataAndReply();
+      ProcessDataAndReply(tick);
     }
     else
     {
       HandleEthernetShieldConnection(0);
       HandleEthernetShieldConnection(1);
+
+      DvlReady = false;
+      RovInsReady = false;
+      //SendDepth = false;
+      //SendAttitude = false;
     }
   }
 
-  Serial.print(VERSION);
+  if (tick)
+  {
+    int ethernetValue = 0;
+    if (Ethernet.linkStatus() == LinkOFF)
+    {
+      ethernetValue += 1;
+    }
+
+    if (client0Connected)
+    {
+      ethernetValue += 2;
+    }
+
+    if (client1Connected)
+    {
+      ethernetValue += 4;
+    }
+
+    now = millis();
+    RovInsReady = (now = millis() - lastHeadingRecieved)  > 1000;
+    DvlReady = (now = millis() - lastDvlMessageRecieved)  > 1000;
+
+    SendHeartBeatMessage(RunTimeMessage_Running, ethernetValue);
+  }
 }
 
 bool InInterupt = false;
@@ -176,11 +247,10 @@ bool InInterupt = false;
 // This function is called whenever the CAN Bus recieved a message.
 // You cannot print with Serial while inside an interupt function.
 void CanBusInterupt() {
-  if (!InInterupt)
+
+  if (canInterupt)
   {
-    InInterupt = true;
     ReadCanBusMessages();
-    InInterupt = false;
   }
 }
 
@@ -188,6 +258,7 @@ void CanBusInterupt() {
 // In an attemp to lose as few messages as possible, this function is called very frequently.
 // Call it multiple times in the loop, and since any lengthly while loops.
 void ReadCanBusMessages() {
+  canInterupt = false;
   if (CAN_MSGAVAIL == CAN.checkReceive()) {
     
     uint8_t len = 0;
@@ -199,6 +270,17 @@ void ReadCanBusMessages() {
       uint32_t id = CAN.getCanId();
       uint32_t command = id >> 8;
       uint32_t address = id - (command << 8);
+      
+      // if (((int)byte) >= 255)
+      // {
+      //   canMessageCounter = 0;
+      // }
+      // else
+      // {
+      // }
+        canMessageCounter++;
+
+      //Serial.println("CAN: c" + String(command) + " a" + String(address));
 
       if (address == 9) {
          if (command == 0xFFFC)
@@ -209,12 +291,23 @@ void ReadCanBusMessages() {
           HandleSystemModeControlCommand(buf);
         }
       }
-      else if (command == 0xFFE7 && address == 0 && buf[0] == 4)
+      else if (address == 0)
       {
-        HandlePidTuningCommand(buf);
+        if (command == 0xFFE7 && buf[0] == 4)
+        {
+          HandlePidTuningCommand(buf);
+        }
+      }
+      else if (address == 50)
+      {
+        if (command == 0xFFD5)
+        {
+          HandleRelayNodeCommand(buf);
+        }
       }
     }
   }
+  canInterupt = true;
 }
 
 void HandleSystemModeControlCommand(uint8_t buf[]){
@@ -242,7 +335,9 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
 
         Serial.println("Station keeping enabled.");
         newPosition = false;
-      } else {
+      }
+      else
+      {
         Serial.println("Station keeping disabled.");
       }
     }
@@ -250,6 +345,7 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
 }
 
 void HandlePidTuningCommand(uint8_t buf[]){
+  canInterupt = false;
   if (printFunctionEntry) Serial.println("ENTER: HandlePidTuningCommand");
 
   xKp = buf[1];
@@ -266,9 +362,11 @@ void HandlePidTuningCommand(uint8_t buf[]){
   longitudePID.SetTunings(yKp, yKi, yKd);
   
   Serial.println("New tunings: p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
+  canInterupt = true;
 }
 
 void HandleSystemMotionControlCommand(uint8_t buf[]){
+  canInterupt = false;
   if (printFunctionEntry) Serial.println("ENTER: HandleSystemMotionControlCommand");
   
   verticalMsb = buf[2];
@@ -278,6 +376,7 @@ void HandleSystemMotionControlCommand(uint8_t buf[]){
 
   Serial.println("Recv Yaw: " + String(yawMsb) + "." + String(yawLsb));
   SendThrusterCommand(yOutput, xOutput);
+  canInterupt = true;
 }
 
 void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
@@ -294,6 +393,13 @@ void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
   }
 
   Serial.println("CAN Message: Address: " + String(address) + ". Command: " + commandStr + ". DLC: " + String(len) + ". Data: " + dataStr);
+}
+
+void HandleRelayNodeCommand(uint8_t buf[])
+{
+  SendAttitude = (buf[0] & 1) == 1;
+  SendDepth = (buf[0] & 2) == 2;
+  Serial.println("HIT RELAY CMD");
 }
 
 void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
@@ -340,20 +446,21 @@ void HandleEthernetShieldConnection(int index){
   }
 }
 
-void ProcessDataAndReply(){
+void ProcessDataAndReply(bool tick){
   if (printFunctionEntry) Serial.println("ENTER: HandleStationKeeping");
     
   if (stationKeepingEnabled) {
     HandlePidAndSendThrusterCommand();
   }
 
-  unsigned long now = millis();
-  if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
+  if (tick)
   {
-    lastMessageSent = now;
-    SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
+    if (SendAttitude)
+    {
+      SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
+    }
+
     SendDepthAltMessage(Depth * 100, Altitude * 100);
-    SendHeartBeatMessage();
   }
 }
 
@@ -443,47 +550,76 @@ void SendAttitudeMessage(int heading, int pitch, int roll){
 void SendDepthAltMessage(int depth, int alt){
   if (printFunctionEntry) Serial.println("ENTER: SendDepthAltMessage");
 
-  int depthMsb = depth >> 8;
   int altMsb = alt >> 8;
 
-  if (depth < 0 )
-  {
-    depthMsb = 256 + depthMsb;
-  }
 
   if (alt < 0 )
   {
     altMsb = 256 + altMsb;
   }
 
-  messageOne[0] = (byte)depthMsb;       // depth msb
-  messageOne[1] = (byte)depth & 0xFF;   // depth lsb
-  messageOne[2] = (byte)altMsb;         // alt msb
-  messageOne[3] = (byte)alt & 0xFF;     // alt lsb
-  messageOne[4] = 0;
-  messageOne[5] = 0;
-  messageOne[6] = 0;
-  messageOne[7] = 0;                    // depth 2 DP
-  
-  Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+  if (SendDepth)
+  {
+    int depthMsb = depth >> 8;
+    if (depth < 0 )
+    {
+      depthMsb = 256 + depthMsb;
+    }
 
-  // Set the board select to 0 if not usuing an additional depth sensor, set to 9 otherwise.
-  SendCanMessage(0xFFFE, 0, messageOne);
-}
+    messageOne[0] = (byte)depthMsb;       // depth msb
+    messageOne[1] = (byte)depth & 0xFF;   // depth lsb
+    messageOne[2] = (byte)altMsb;         // alt msb
+    messageOne[3] = (byte)alt & 0xFF;     // alt lsb
+    messageOne[4] = 0;
+    messageOne[5] = 0;
+    messageOne[6] = 0;
+    messageOne[7] = 0;                    // depth 2 DP
+    
+    Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
 
-void SendHeartBeatMessage(){
-  if (printFunctionEntry) Serial.println("ENTER: SendHeartBeatMessage");
-
-    messageOne[0] = 0;
-    messageOne[1] = 0;
+    // Set the board select to 0 if not usuing an additional depth sensor, set to 9 otherwise.
+    SendCanMessage(0xFFFE, 0, messageOne);
+  }
+  else
+  {
+    // Only send altitude
+    messageOne[0] = (byte)altMsb;       // altitude msb
+    messageOne[1] = (byte)alt & 0xFF;   // altitude lsb
     messageOne[2] = 0;
     messageOne[3] = 0;
     messageOne[4] = 0;
-    messageOne[5] = stationKeepingEnabled ? 2 : 1;
-    messageOne[6] = pidRecievedCounter;
+    messageOne[5] = 0;
+    messageOne[6] = 0;
     messageOne[7] = 0;
 
+    Serial.println("Sent depth: Alt: " + String(alt));
+
+    SendCanMessage(0xFFCF, 0, messageOne);
+  }
+}
+
+void SendHeartBeatMessage(int status, int additionalData){
+  if (printFunctionEntry) Serial.println("ENTER: SendHeartBeatMessage");
+
+    int dataSending = 0;
+    if (SendAttitude) dataSending += 1;
+    if (SendDepth) dataSending += 2;
+
+    int dataRecieving = 0;
+    if (RovInsReady) dataRecieving += 1;
+    if (DvlReady) dataRecieving += 2;
+
+    messageOne[0] = status;                           // Status message - usually the place this function was called from.
+    messageOne[1] = additionalData;                   // For regular heartbeat it tells us the state of the ethernet connection.
+    messageOne[2] = dataRecieving;                    // What data do we have.
+    messageOne[3] = dataSending;                      // What data are we sending.
+    messageOne[4] = 0;
+    messageOne[5] = stationKeepingEnabled ? 2 : 1;    // Is station keeping enabled.
+    messageOne[6] = pidRecievedCounter;               // Not used, how many times has the PID message been recieved.
+    messageOne[7] = canMessageCounter;                // How many messages have been recieved.
+
     SendCanMessage(0xFF8F, 9, messageOne);
+    Serial.println("Hearbeat: msg:" + String(canMessageCounter));
 }
 
 void RovInsReadMessage_OctansStandard() {
@@ -526,6 +662,7 @@ void RovInsReadMessage_OctansStandard() {
         }
 
         Heading = String(headingMessage).toFloat();
+        lastHeadingRecieved = millis();
         foundHeadingMessage = true;
         //Serial.println("Heading: " + String(Heading));
       }
@@ -652,6 +789,8 @@ void RovInsReadMessage_RDIDP6() {
       }
     }
     
+    lastDvlMessageRecieved = millis();
+
     // Clear the buffer.
     // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
     int cleanCounter = 0;
