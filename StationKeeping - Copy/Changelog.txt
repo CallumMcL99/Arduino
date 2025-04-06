@@ -1,0 +1,7 @@
+### 1.0.1 - 01/04/2025 ###
+##Added
+- Can Bus interrupts.
+
+### 1.0.0 - xxx ###
+First version with CAN bus and Ethernet communications, PID loops implemented.
+Never tested station keep on a live ROV.

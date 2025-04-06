@@ -1,6 +1,6 @@
 /// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-const String VERSION = " v1.0.2.2";
+const String VERSION = " v1.0.2.1";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -32,7 +32,7 @@ uint8_t messageOne[size] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 unsigned long lastMessageSent = 0;
 volatile unsigned long lastHeadingRecieved = 0;
 volatile unsigned long lastDvlMessageRecieved = 0;
-unsigned long delayBetweenSendingMessagesMs = 100;
+const unsigned long delayBetweenSendingMessagesMs = 100;
 
 // Station keeping
 volatile bool stationKeepingEnabled = false;
@@ -69,22 +69,19 @@ IPAddress ip(192, 168, 36, 177);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
-const int portCount = 3;
-int ports[portCount] { 8111, 8113, 8221 };
+int ports[2] { 8111, 8113 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
-IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation.
-IPAddress server_rovIns(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
+IPAddress server(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
-int connectionFailedCounters[portCount] = { 0, 0, 0 };
-EthernetClient clients[portCount];
-bool EthernetConnecteds[portCount] = { false, false, false };
+int connectionFailedCounters[2] = { 0, 0 };
+EthernetClient clients[2];
+bool EthernetConnecteds[2] = { false, false };
 const int clientOctansStandardId = 0;
 const int clientRdiPd6Id = 1;
-const int clientSurfaceId = 2;
 
 // RovIns Info
 volatile double Pitch = 0;
@@ -102,10 +99,9 @@ volatile bool SendDepth = false;
 
 // Debug
 bool printFunctionEntry = false;
-bool IsInRov = false;
 
 void setup() {
-  Serial.begin(57600, SERIAL_8N1);
+  Serial.begin(57600);
 
   // Only use this while debugging. This waits for a serial (USB) connection.
   //while (!Serial) ;
@@ -123,14 +119,9 @@ void setup() {
   SendHeartBeatMessage(InitialiseMessage_PidLimitsSet, 0);
 
   // Set the function to be called when the CAN Bus recieved a message.
-    pinMode(CAN_INT_PIN, INPUT);
-    pinMode(CAN_INT_PIN, INPUT_PULLUP); // Not needed?
-    attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, CHANGE);
-  
-  if (IsInRov)
-  {
-    delayBetweenSendingMessagesMs = 1000;
-  }
+  pinMode(CAN_INT_PIN, INPUT);
+  pinMode(CAN_INT_PIN, INPUT_PULLUP); // Not needed?
+  attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, CHANGE);
 
   SendHeartBeatMessage(InitialiseMessage_Complete, 0);
   
@@ -190,7 +181,7 @@ void loop() {
     tick = true;
   }
 
-  bool client0Connected, client1Connected, client2Connected;
+  bool client0Connected, client1Connected;
   if (Ethernet.linkStatus() != LinkOFF)
   {
     delay(100);
@@ -199,13 +190,6 @@ void loop() {
     // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
     delay(100);
     client1Connected = clients[1].connected();
-
-    if (!IsInRov)
-    {
-      // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
-      delay(100);
-      client2Connected = clients[2].connected();
-    }
 
     // The interupt flag seems to get stuck, but calling this sorts that out.
     ReadCanBusMessages();
@@ -222,23 +206,14 @@ void loop() {
     }
     else
     {
-      HandleEthernetShieldConnection(0, true);
-      HandleEthernetShieldConnection(1, true);
+      HandleEthernetShieldConnection(0);
+      HandleEthernetShieldConnection(1);
 
       DvlReady = false;
       RovInsReady = false;
       //SendDepth = false;
       //SendAttitude = false;
     }
-  }
-
-  if (client2Connected)
-  {
-    ReadMessage_SurfacePC();
-  }
-  else
-  {
-    HandleEthernetShieldConnection(clientSurfaceId, false);
   }
 
   if (tick)
@@ -257,11 +232,6 @@ void loop() {
     if (client1Connected)
     {
       ethernetValue += 4;
-    }
-
-    if (client2Connected)
-    {
-      ethernetValue += 8;
     }
 
     now = millis();
@@ -289,73 +259,60 @@ void CanBusInterupt() {
 // Call it multiple times in the loop, and since any lengthly while loops.
 void ReadCanBusMessages() {
   canInterupt = false;
-  if (IsInRov)
-  {
-    if (CAN_MSGAVAIL == CAN.checkReceive()) {
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    
+    uint8_t len = 0;
+    while (CAN.checkReceive() == CAN_MSGAVAIL){
+      uint8_t buf[16];
+
+      CAN.readMsgBuf(&len, buf);
+
+      uint32_t id = CAN.getCanId();
+      uint32_t command = id >> 8;
+      uint32_t address = id - (command << 8);
       
-      uint8_t len = 0;
-      while (CAN.checkReceive() == CAN_MSGAVAIL){
-        uint8_t buf[16];
+      // if (((int)byte) >= 255)
+      // {
+      //   canMessageCounter = 0;
+      // }
+      // else
+      // {
+      // }
+        canMessageCounter++;
 
-        CAN.readMsgBuf(&len, buf);
+      //Serial.println("CAN: c" + String(command) + " a" + String(address));
 
-        uint32_t id = CAN.getCanId();
-        uint32_t command = id >> 8;
-
-        // Replace with: address = id & 0xFF00;
-        uint32_t address = id - (command << 8);
-        
-        // if (((int)byte) >= 255)
-        // {
-        //   canMessageCounter = 0;
-        // }
-        // else
-        // {
-        // }
-          canMessageCounter++;
-
-        //Serial.println("CAN: c" + String(command) + " a" + String(address));
-
-        HandleTelegram(command, address, buf);
+      if (address == 9) {
+         if (command == 0xFFFC)
+        {
+          HandleSystemMotionControlCommand(buf);
+        }
+        else if (command == 0xFF8E) {
+          HandleSystemModeControlCommand(buf);
+        }
+      }
+      else if (address == 0)
+      {
+        if (command == 0xFFE7 && buf[0] == 4)
+        {
+          HandlePidTuningCommand(buf);
+        }
+      }
+      else if (address == 50)
+      {
+        if (command == 0xFFD5)
+        {
+          HandleRelayNodeCommand(buf);
+        }
       }
     }
   }
   canInterupt = true;
 }
 
-void HandleTelegram(int command, int address, byte buf[])
-{
-  Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
- 
-  if (address == 9) {
-    if (command == 0xFFFC)
-    {
-      HandleSystemMotionControlCommand(buf);
-    }
-    else if (command == 0xFF8E) {
-      HandleSystemModeControlCommand(buf);
-    }
-  }
-  else if (address == 0)
-  {
-    if (command == 0xFFE7 && buf[0] == 4)
-    {
-      HandlePidTuningCommand(buf);
-    }
-  }
-  else if (address == 50)
-  {
-
-    if (command == 0xFFD5)
-    {
-      HandleRelayNodeCommand(buf);
-    }
-  }
-}
-
 void HandleSystemModeControlCommand(uint8_t buf[]){
   // if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
-  Serial.println("PID recv");
+  
   if (buf[5] == 1 || buf[5] == 2) {
     bool newStationKeeping = buf[5] == 2;
 
@@ -448,32 +405,11 @@ void HandleRelayNodeCommand(uint8_t buf[])
 void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
   if (printFunctionEntry) Serial.println("ENTER: SendCanMessage");
 
-  // Serial.println(id);
-  // Serial.println(id >> 8);
-  // Serial.println(id && 0xFF00);
-
-  if (IsInRov)
-  {
-    uint32_t fullId = (id << 8) + address;
-    CAN.sendMsgBuf(fullId, 1, size, message);
-  }
-  else
-  {
-    if (clients[clientSurfaceId].connected())
-    {
-      //Serial.println("$ARD," + String(id) + "," + String(address) + "0,0,0,0,0,0,0,0," + "#");
-      
-      clients[clientSurfaceId].print(
-        "$ARD," + String(id) + "," + String(address) +
-        "," + String(message[0]) + "," + String(message[1]) + "," + String(message[2]) + "," + String(message[3]) +
-        "," + String(message[4]) + "," + String(message[5]) + "," + String(message[6]) + "," + String(message[7]) +
-        "#"
-      );
-    }
-  }
+  uint32_t fullId = (id << 8) + address;
+  CAN.sendMsgBuf(fullId, 1, size, message);
 }
 
-void HandleEthernetShieldConnection(int index, bool rovIns){
+void HandleEthernetShieldConnection(int index){
   if (printFunctionEntry) Serial.println("ENTER: HandleEthernetShieldConnection");
   
   if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF)// && connectionFailedCounters[index] < 20)
@@ -483,10 +419,6 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       // Disconnect from previous connection.
       clients[index].stop();
 
-      IPAddress server;
-      if (rovIns) server = server_rovIns;
-      else server = server_surfacePc; 
-
       // if you get a connection, report back via serial:
       if (clients[index].connect(server, ports[index])) {
         Serial.println("Ethernet Shield RT " + String(index) + " - client connected.");
@@ -495,7 +427,7 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       } 
       else {
         // if you didn't get a connection to the server:
-        //Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
+        Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
         EthernetConnecteds[index] = false;
         connectionFailedCounters[index]++;
       }
@@ -686,8 +618,8 @@ void SendHeartBeatMessage(int status, int additionalData){
     messageOne[6] = pidRecievedCounter;               // Not used, how many times has the PID message been recieved.
     messageOne[7] = canMessageCounter;                // How many messages have been recieved.
 
-    //Serial.println("Hearbeat: msg:" + String(canMessageCounter));
     SendCanMessage(0xFF8F, 9, messageOne);
+    Serial.println("Hearbeat: msg:" + String(canMessageCounter));
 }
 
 void RovInsReadMessage_OctansStandard() {
@@ -871,42 +803,6 @@ void RovInsReadMessage_RDIDP6() {
     if (cleanCounter != 0)
     {
       //Serial.println("Cleaned buffer: " + String(cleanCounter));
-    }
-  }
-}
-
-void ReadMessage_SurfacePC() {
-  if (clients[clientSurfaceId].available()) {
-
-    int counter = 0;
-    while (clients[clientSurfaceId].available() && counter++ < 8)
-    {
-      String message = clients[clientSurfaceId].readStringUntil('#');
-
-      int id = message.substring(5, 13).toInt();
-      int address = id & 0xFF;
-      id = id >> 8;
-
-      int length = message.substring(14, 15).toInt();
-      
-      int commaCounter = 0;
-      String dataStrs[length];
-      byte datas[length];
-      for (int i = 16; i < message.length(); i++)
-      {
-        if (message[i] != ',')
-        {
-          dataStrs[commaCounter] += message[i];
-        }
-        else
-        {
-          datas[commaCounter] = dataStrs[commaCounter].toInt();
-          commaCounter++;
-        }
-      }
-
-      canMessageCounter++;
-      HandleTelegram(id, address, datas);
     }
   }
 }
