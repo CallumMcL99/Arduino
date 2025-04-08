@@ -102,8 +102,10 @@ volatile bool SendAttitude = false;
 volatile bool SendDepth = false;
 
 // Debug
-bool printFunctionEntry = false;
+bool printFunctionEntry = true;
 bool IsInRov = false;
+
+int dbLat = 1234;
 
 void setup() {
   Serial.begin(250000, SERIAL_8N1);
@@ -219,8 +221,6 @@ void loop() {
 
       RovInsReadMessage_OctansStandard();
       RovInsReadMessage_RDIDP6();
-
-      ProcessDataAndReply(tick);
     }
     else
     {
@@ -243,6 +243,8 @@ void loop() {
     HandleEthernetShieldConnection(clientSurfaceId, false);
   }
 
+  ProcessDataAndReply(true);
+  
   if (tick)
   {
     int ethernetValue = 0;
@@ -361,7 +363,7 @@ void HandleTelegram(int command, int address, byte buf[])
 
 void HandleSystemModeControlCommand(uint8_t buf[]){
   // if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
-  Serial.println("SK mode recv. Enabled: " + String(buf[5]));
+  //Serial.println("SK mode recv. Enabled: " + String(buf[5]));
   if (buf[5] == 1 || buf[5] == 2) {
     bool newStationKeeping = buf[5] == 2;
 
@@ -430,7 +432,7 @@ void HandleSystemMotionControlCommand(uint8_t buf[]){
   yawMsb = buf[4];
   yawLsb = buf[5];
 
-  Serial.println("Recv Yaw: " + String(yawMsb) + "." + String(yawLsb));
+  //Serial.println("Recv Yaw: " + String(yawMsb) + "." + String(yawLsb));
   SendThrusterCommand(yOutput, xOutput);
   canInterupt = true;
 }
@@ -553,6 +555,8 @@ void HandlePidAndSendThrusterCommand() {
     newVelocityData = false;
     xOutput = latitudePID.Run(currentXVelocity);
     yOutput = longitudePID.Run(currentYVelocity);
+
+    Serial.println("xVel: " + String(currentXVelocity) + ", xOut: " + String(xOutput) + ", yVel: " + String(currentYVelocity) + ", yOut: " + String(yOutput));
   }
 
   // Send data even if no new velocity data was found so the yaw & vertical joystick commands can be sent.
@@ -585,7 +589,7 @@ void SendThrusterCommand(int forward, int lateral) {
   messageOne[7] = (byte)lateral & 0xFF;
 
   //Serial.println("            Sent Yaw: " + String(yawMsb) + "." + String(yawLsb));
-  Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
+  //Serial.println("Sent thruster command: F/A: " + String(forward) + ". Lateral: " + String(lateral) + ". Yaw: " + String(yawMsb) + " " + String(yawLsb));
   //Serial.println("Sent CMD: " + String(foreAft) + ", " + String(lateral) + ". Lat: " + String(currentLatitude) + " - " + String(holdLatitude));
   //Serial.println("Lateral: " + String(messageOne[6]) + " " + String(messageOne[7]));
 
@@ -787,6 +791,8 @@ void RovInsReadMessage_OctansStandard() {
       }
     }
 
+    //Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
+
     // Clear the buffer.
     // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
     while (clients[clientOctansStandardId].available())
@@ -794,6 +800,56 @@ void RovInsReadMessage_OctansStandard() {
       //Serial.println("Cleaing buffer");
       clients[clientOctansStandardId].readStringUntil('\n');
     }
+  }
+}
+
+void RovInsReadMessage_Hydrography() {
+  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_OctansStandard");
+
+  if (clients[clientOctansStandardId].available()) {
+    //$H,  Heading, roll, pitch, lat,    long,     alt,  heave*checksum
+    //$HYDRO,a.aaa,b.bbb,c.ccc,x.xxxxxxx,y.yyyyyyy,z.zzz,w.www*hh<CR><LF>
+
+    String message = "NA";
+    while (clients[clientOctansStandardId].available())
+    {
+      message = clients[clientOctansStandardId].readStringUntil('\n');
+    }
+
+    Serial.println(message);
+    String data = "";
+    int counter = 0; 
+    char c;
+    for (int i = 7; i < message.length(); i++)
+    {
+      c = message[i];
+      if (c != ',')
+      {
+        data += c;
+      }
+      else
+      {
+        Serial.println(String(counter) + ": " + data);
+
+        // if (counter == 0)
+        // {
+        //   Heading = data.toInt();
+        // }
+        // else (counter == 1)
+        // {
+        //   Roll = data.toInt();
+        // } 
+        // else
+        // {
+        //   Pitch = data.toInt();
+        // }
+
+        data = "";
+        counter++;
+      }
+    }
+
+    Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
   }
 }
 
@@ -869,6 +925,8 @@ void RovInsReadMessage_RDIDP6() {
         }
       }
     }
+
+    //Serial.println("Alt: " + String(Altitude) + ", xVel: " + String(currentXVelocity) + ", yVal: " + String(currentYVelocity));
     
     lastDvlMessageRecieved = millis();
 
@@ -913,59 +971,24 @@ void ReadMessage_SurfacePC() {
         dataStrs[0] = "";
       }
 
-      // if (id ==  0xFFFC)
-      // {
-      // }
-      Serial.println(message);
-
       char c;
       for (int i = 16; i < message.length()&& commaCounter <= length; i++)
       {
-        // Serial.println("HIT3, i:" + String(i) + ", message[i]: " + message[i] + ", commaCounter: " + String(commaCounter) + ", length: " + String(length));
-
         c = message[i];
         if (c != ',')
         {
           if (c == '0' || c == '1' || c == '2' || c == '3' || c == '4' || c == '5' || c == '6' || c == '7' ||c == '8' || c == '9')
           {
             dataStrs[commaCounter] += c;
-            // if (id == 0xFF8E)
-            // {
-            // }
-            Serial.println("Added " + c);
           }
         }
         else if (c == ',')
         {
-          // if (id ==  0xFFFC)
-          // {
-          // }
-            //Serial.println("d" + String(commaCounter) + ": " + dataStrs[commaCounter] + "");
           datas[commaCounter] = dataStrs[commaCounter].toInt();
           commaCounter++;
-
-          // if (commaCounter <= length)
-          // {
-          //   dataStrs[commaCounter] = "";
-          // }
         }
       }
 
-      // if (id == 0xFF8E)
-      // {
-      //   Serial.println("Length: " + String(length) + ", commaCounter: " + String(commaCounter));  
-      // }
-
-      // if (id == 0xFF8E)
-      // {
-      //   Serial.println(message);
-      //   Serial.print("Id: " + String(id) + ", addr: " + String(address) + ", Data: ");
-      //   for (int i = 0; i < length; i++)
-      //   {
-      //     Serial.print("[ " + String(i) +"]: " + String(datas[i]) + ", ");
-      //   }
-      //   Serial.println("");
-      // }
       canMessageCounter++;
       HandleTelegram(id, address, datas);
     }
