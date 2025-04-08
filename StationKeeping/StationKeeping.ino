@@ -1,6 +1,6 @@
 /// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-const String VERSION = " v1.0.2.2";
+const String VERSION = " v1.0.2.3";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -76,7 +76,8 @@ int ports[portCount] { 8111, 8113, 8221 };
 // If connecting to a Windows device, this is configured through:
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
-IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation.
+// IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation. ---- This PC.
+IPAddress server_surfacePc(192, 168, 36, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Vocean PC
 IPAddress server_rovIns(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
 int connectionFailedCounters[portCount] = { 0, 0, 0 };
@@ -182,6 +183,7 @@ void InitialiseEthernetShield(){
 void loop() {
   if (printFunctionEntry) Serial.println("ENTER: loop");
   
+  Serial.println("Running " + VERSION);
   bool tick = false; 
   unsigned long now = millis();
   if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
@@ -325,30 +327,34 @@ void ReadCanBusMessages() {
 
 void HandleTelegram(int command, int address, byte buf[])
 {
-  Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
+  // TODO remove this
+  if (command <= 0xFFFF)
+  {
+   Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
  
-  if (address == 9) {
-    if (command == 0xFFFC)
-    {
-      HandleSystemMotionControlCommand(buf);
+    if (address == 9) {
+      if (command == 0xFFFC)
+      {
+        HandleSystemMotionControlCommand(buf);
+      }
+      else if (command == 0xFF8E) {
+        HandleSystemModeControlCommand(buf);
+      }
     }
-    else if (command == 0xFF8E) {
-      HandleSystemModeControlCommand(buf);
-    }
-  }
-  else if (address == 0)
-  {
-    if (command == 0xFFE7 && buf[0] == 4)
+    else if (address == 0)
     {
-      HandlePidTuningCommand(buf);
+      if (command == 0xFFE7 && buf[0] == 5 || buf[0] == 6)
+      {
+        Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
+        HandlePidTuningCommand(buf, buf[0] == 5);
+      }
     }
-  }
-  else if (address == 50)
-  {
-
-    if (command == 0xFFD5)
+    else if (address == 50)
     {
-      HandleRelayNodeCommand(buf);
+      if (command == 0xFFD5)
+      {
+        HandleRelayNodeCommand(buf);
+      }
     }
   }
 }
@@ -387,24 +393,31 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
   }
 }
 
-void HandlePidTuningCommand(uint8_t buf[]){
+void HandlePidTuningCommand(uint8_t buf[], bool isX){
   canInterupt = false;
   if (printFunctionEntry) Serial.println("ENTER: HandlePidTuningCommand");
 
-  xKp = buf[1];
-  xKi = buf[2];
-  xKd = buf[3];
+  if (isX)
+  {
+    xKp = buf[1];
+    xKi = buf[2];
+    xKd = buf[3];
+    latitudePID.SetTunings(xKp, xKi, xKd);
+  }
+  else
+  {
+    yKp = xKp;
+    yKi = xKi;
+    yKd = xKd;
+    longitudePID.SetTunings(yKp, yKi, yKd);
+  }
   
   pidRecievedCounter = buf[4];
 
-  yKp = xKp;
-  yKi = xKi;
-  yKd = xKd;
-
-  latitudePID.SetTunings(xKp, xKi, xKd);
-  longitudePID.SetTunings(yKp, yKi, yKd);
-  
-  Serial.println("New tunings: p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
+  String type;
+  if (isX) type = "Lat";
+  else type = "long";
+  Serial.println("New tunings " + type + ": p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
   canInterupt = true;
 }
 
@@ -495,7 +508,7 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       } 
       else {
         // if you didn't get a connection to the server:
-        //Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
+        Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
         EthernetConnecteds[index] = false;
         connectionFailedCounters[index]++;
       }
@@ -515,7 +528,7 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
 }
 
 void ProcessDataAndReply(bool tick){
-  if (printFunctionEntry) Serial.println("ENTER: HandleStationKeeping");
+  if (printFunctionEntry) Serial.println("ENTER: ProcessDataAndReply. Tick: " + String(tick));
     
   if (stationKeepingEnabled) {
     HandlePidAndSendThrusterCommand();
@@ -611,7 +624,7 @@ void SendAttitudeMessage(int heading, int pitch, int roll){
   messageOne[6] = 0;
   messageOne[7] = 0;
 
-  Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
+  //Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
   SendCanMessage(0xFFFF, 0, messageOne);
 }
 
@@ -643,7 +656,7 @@ void SendDepthAltMessage(int depth, int alt){
     messageOne[6] = 0;
     messageOne[7] = 0;                    // depth 2 DP
     
-    Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+    //Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
 
     // Set the board select to 0 if not usuing an additional depth sensor, set to 9 otherwise.
     SendCanMessage(0xFFFE, 0, messageOne);
@@ -660,7 +673,7 @@ void SendDepthAltMessage(int depth, int alt){
     messageOne[6] = 0;
     messageOne[7] = 0;
 
-    Serial.println("Sent depth: Alt: " + String(alt));
+    //Serial.println("Sent Alt: " + String(alt));
 
     SendCanMessage(0xFFCF, 0, messageOne);
   }
@@ -876,12 +889,15 @@ void RovInsReadMessage_RDIDP6() {
 }
 
 void ReadMessage_SurfacePC() {
+  if (printFunctionEntry) Serial.println("ENTER: ReadMessage_SurfacePC");
+
   if (clients[clientSurfaceId].available()) {
 
     int counter = 0;
     while (clients[clientSurfaceId].available() && counter++ < 8)
     {
       String message = clients[clientSurfaceId].readStringUntil('#');
+      Serial.println(message);
 
       int id = message.substring(5, 13).toInt();
       int address = id & 0xFF;
@@ -892,17 +908,40 @@ void ReadMessage_SurfacePC() {
       int commaCounter = 0;
       String dataStrs[length];
       byte datas[length];
-      for (int i = 16; i < message.length(); i++)
+
+      if (length > 0)
       {
-        if (message[i] != ',')
+        dataStrs[0] = "";
+      }
+
+      char c;
+      for (int i = 16; i < message.length() - 1 && commaCounter <= length; i++)
+      {
+        // Serial.println("HIT3, i:" + String(i) + ", message[i]: " + message[i] + ", commaCounter: " + String(commaCounter) + ", length: " + String(length));
+
+        c = message[i];
+        if (c != ',')
         {
-          dataStrs[commaCounter] += message[i];
+          if (c == '0' || c == '1' || c == '2' || c == '3' || c == '4' || c == '5' || c == '6' || c == '7' ||c == '8' || c == '9')
+          {
+            dataStrs[commaCounter] += c;
+          }
         }
-        else
+        else if (c == ',')
         {
           datas[commaCounter] = dataStrs[commaCounter].toInt();
           commaCounter++;
+
+          if (commaCounter <= length)
+          {
+            dataStrs[commaCounter] = "";
+          }
         }
+      }
+
+      for (int i = 0; i < length; i++)
+      {
+        Serial.print("Data[i]: " + String(datas[i]) + ", ");
       }
 
       canMessageCounter++;
