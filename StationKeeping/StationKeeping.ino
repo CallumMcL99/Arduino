@@ -5,8 +5,10 @@ const String VERSION = " v1.0.2.3";
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
 #include <SPI.h>
+// #include "PID.h"
 #include <PID_v2.h>
 #include <Ethernet.h>
+
 
 // CAN-BUS
 const int SPI_CS_PIN = 9;
@@ -102,10 +104,9 @@ volatile bool SendAttitude = false;
 volatile bool SendDepth = false;
 
 // Debug
-bool printFunctionEntry = true;
+bool printFunctionEntry = false;
 bool IsInRov = false;
 
-int dbLat = 1234;
 
 void setup() {
   Serial.begin(250000, SERIAL_8N1);
@@ -378,8 +379,8 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
         latitudePID.SetOutputLimits(-1000, 1000);
         longitudePID.SetOutputLimits(-1000, 1000);
 
-        latitudePID.Start(0, 0, 0);
-        longitudePID.Start(0, 0, 0);
+        latitudePID.Start(currentXVelocity, xOutput, 0);
+        longitudePID.Start(currentYVelocity, yOutput, 0);
 
         xOutput = 0;
         yOutput = 0;
@@ -405,6 +406,7 @@ void HandlePidTuningCommand(uint8_t buf[], bool isX){
     xKi = buf[2];
     xKd = buf[3];
     latitudePID.SetTunings(xKp, xKi, xKd);
+    latitudePID.Start(0, 0, 0);
   }
   else
   {
@@ -412,6 +414,7 @@ void HandlePidTuningCommand(uint8_t buf[], bool isX){
     yKi = xKi;
     yKd = xKd;
     longitudePID.SetTunings(yKp, yKi, yKd);
+    longitudePID.Start(0, 0, 0);
   }
   
   pidRecievedCounter = buf[4];
@@ -493,7 +496,8 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
   
   if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF)// && connectionFailedCounters[index] < 20)
   {
-    if (!clients[index].connected()){
+    if (!clients[index].connected())
+    {
 
       // Disconnect from previous connection.
       clients[index].stop();
@@ -503,12 +507,14 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       else server = server_surfacePc; 
 
       // if you get a connection, report back via serial:
-      if (clients[index].connect(server, ports[index])) {
+      if (clients[index].connect(server, ports[index]))
+      {
         Serial.println("Ethernet Shield RT " + String(index) + " - client connected.");
         EthernetConnecteds[index] = true;
         connectionFailedCounters[index] = 0;
       } 
-      else {
+      else
+      {
         // if you didn't get a connection to the server:
         Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
         EthernetConnecteds[index] = false;
@@ -516,10 +522,12 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       }
     }
   }
-  else {
+  else
+  {
     Serial.println("Ethernet Shield RT " + String(index) + " - Error.");
     EthernetConnecteds[index] = false;
-    if (clients[index].connected()){
+    if (clients[index].connected())
+    {
       // Disconnect from previous connection.
       clients[index].stop();
     }
@@ -547,14 +555,21 @@ void ProcessDataAndReply(bool tick){
   }
 }
 
+int accumX = 0;
+int accumY = 0;
+
+
 void HandlePidAndSendThrusterCommand() {
   if (printFunctionEntry) Serial.println("ENTER: HandlePidAndSendThrusterCommand");
 
   if (newVelocityData)
   {
     newVelocityData = false;
-    xOutput = latitudePID.Run(currentXVelocity);
-    yOutput = longitudePID.Run(currentYVelocity);
+    accumX += currentXVelocity;
+    accumY += currentYVelocity;
+
+    xOutput = latitudePID.Run(accumX);
+    yOutput = longitudePID.Run(accumY);
 
     Serial.println("xVel: " + String(currentXVelocity) + ", xOut: " + String(xOutput) + ", yVel: " + String(currentYVelocity) + ", yOut: " + String(yOutput));
   }
@@ -719,7 +734,7 @@ void RovInsReadMessage_OctansStandard() {
     bool foundHeadingMessage = false;
     bool foundPitchAndRollMessage = false;
     int counter = 0;
-    while (clients[clientOctansStandardId].available() && counter++ < 8 && (!foundHeadingMessage || !foundPitchAndRollMessage))
+    while (clients[clientOctansStandardId].available())
     {
       String message = clients[clientOctansStandardId].readStringUntil('\n');
       //Serial.println(String(counter) + " - " + message);
