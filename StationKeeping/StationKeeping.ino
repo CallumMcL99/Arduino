@@ -77,7 +77,7 @@ int ports[portCount] { 8111, 8113, 8221 };
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
 // IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation. ---- This PC.
-IPAddress server_surfacePc(192, 168, 36, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Vocean PC
+IPAddress server_surfacePc(192, 168, 36, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Client PC
 IPAddress server_rovIns(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
 int connectionFailedCounters[portCount] = { 0, 0, 0 };
@@ -106,7 +106,7 @@ bool printFunctionEntry = false;
 bool IsInRov = false;
 
 void setup() {
-  Serial.begin(57600, SERIAL_8N1);
+  Serial.begin(250000, SERIAL_8N1);
 
   // Only use this while debugging. This waits for a serial (USB) connection.
   //while (!Serial) ;
@@ -123,13 +123,13 @@ void setup() {
 
   SendHeartBeatMessage(InitialiseMessage_PidLimitsSet, 0);
 
-  // Set the function to be called when the CAN Bus recieved a message.
+  if (IsInRov)
+  {
+    // Set the function to be called when the CAN Bus recieved a message.
     pinMode(CAN_INT_PIN, INPUT);
     pinMode(CAN_INT_PIN, INPUT_PULLUP); // Not needed?
     attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, CHANGE);
   
-  if (IsInRov)
-  {
     delayBetweenSendingMessagesMs = 1000;
   }
 
@@ -183,7 +183,7 @@ void InitialiseEthernetShield(){
 void loop() {
   if (printFunctionEntry) Serial.println("ENTER: loop");
   
-  Serial.println("Running " + VERSION);
+  //Serial.println("Running " + VERSION);
   bool tick = false; 
   unsigned long now = millis();
   if ((now - lastMessageSent) > delayBetweenSendingMessagesMs)
@@ -330,7 +330,7 @@ void HandleTelegram(int command, int address, byte buf[])
   // TODO remove this
   if (command <= 0xFFFF)
   {
-   Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
+    //Serial.println("Id: " + String(command, HEX) + ", addr: " + String(address));
  
     if (address == 9) {
       if (command == 0xFFFC)
@@ -361,7 +361,7 @@ void HandleTelegram(int command, int address, byte buf[])
 
 void HandleSystemModeControlCommand(uint8_t buf[]){
   // if (printFunctionEntry) Serial.println("ENTER: HandleSystemModeControlCommand");
-  Serial.println("PID recv");
+  Serial.println("SK mode recv. Enabled: " + String(buf[5]));
   if (buf[5] == 1 || buf[5] == 2) {
     bool newStationKeeping = buf[5] == 2;
 
@@ -893,11 +893,10 @@ void ReadMessage_SurfacePC() {
 
   if (clients[clientSurfaceId].available()) {
 
-    int counter = 0;
-    while (clients[clientSurfaceId].available() && counter++ < 8)
+    //int counter = 0;
+    while (clients[clientSurfaceId].available())
     {
       String message = clients[clientSurfaceId].readStringUntil('#');
-      Serial.println(message);
 
       int id = message.substring(5, 13).toInt();
       int address = id & 0xFF;
@@ -914,8 +913,13 @@ void ReadMessage_SurfacePC() {
         dataStrs[0] = "";
       }
 
+      // if (id ==  0xFFFC)
+      // {
+      // }
+      Serial.println(message);
+
       char c;
-      for (int i = 16; i < message.length() - 1 && commaCounter <= length; i++)
+      for (int i = 16; i < message.length()&& commaCounter <= length; i++)
       {
         // Serial.println("HIT3, i:" + String(i) + ", message[i]: " + message[i] + ", commaCounter: " + String(commaCounter) + ", length: " + String(length));
 
@@ -925,25 +929,43 @@ void ReadMessage_SurfacePC() {
           if (c == '0' || c == '1' || c == '2' || c == '3' || c == '4' || c == '5' || c == '6' || c == '7' ||c == '8' || c == '9')
           {
             dataStrs[commaCounter] += c;
+            // if (id == 0xFF8E)
+            // {
+            // }
+            Serial.println("Added " + c);
           }
         }
         else if (c == ',')
         {
+          // if (id ==  0xFFFC)
+          // {
+          // }
+            //Serial.println("d" + String(commaCounter) + ": " + dataStrs[commaCounter] + "");
           datas[commaCounter] = dataStrs[commaCounter].toInt();
           commaCounter++;
 
-          if (commaCounter <= length)
-          {
-            dataStrs[commaCounter] = "";
-          }
+          // if (commaCounter <= length)
+          // {
+          //   dataStrs[commaCounter] = "";
+          // }
         }
       }
 
-      for (int i = 0; i < length; i++)
-      {
-        Serial.print("Data[i]: " + String(datas[i]) + ", ");
-      }
+      // if (id == 0xFF8E)
+      // {
+      //   Serial.println("Length: " + String(length) + ", commaCounter: " + String(commaCounter));  
+      // }
 
+      // if (id == 0xFF8E)
+      // {
+      //   Serial.println(message);
+      //   Serial.print("Id: " + String(id) + ", addr: " + String(address) + ", Data: ");
+      //   for (int i = 0; i < length; i++)
+      //   {
+      //     Serial.print("[ " + String(i) +"]: " + String(datas[i]) + ", ");
+      //   }
+      //   Serial.println("");
+      // }
       canMessageCounter++;
       HandleTelegram(id, address, datas);
     }
