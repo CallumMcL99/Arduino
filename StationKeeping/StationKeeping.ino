@@ -1,6 +1,6 @@
 /// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-const String VERSION = " v1.0.2.3";
+const String VERSION = " v1.0.2.4";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -67,7 +67,7 @@ byte mac[] = {
   0xA8, 0x61, 0x0A, 0xAE, 0x24, 0x16
 };
 //IPAddress ip(192, 168, 137, 177);
-IPAddress ip(192, 168, 36, 177);
+IPAddress ip(192, 168, 0, 177);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
@@ -79,8 +79,8 @@ int ports[portCount] { 8111, 8113, 8221 };
 // Contorl Panel > Network & Sharing Center > Ethernet 2 > Properties > TCP/IPv4 > IP address.
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
 // IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation. ---- This PC.
-IPAddress server_surfacePc(192, 168, 36, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Client PC
-IPAddress server_rovIns(192, 168, 36, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
+IPAddress server_surfacePc(192, 168, 0, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Client PC
+IPAddress server_rovIns(192, 168, 0, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
 int connectionFailedCounters[portCount] = { 0, 0, 0 };
 EthernetClient clients[portCount];
