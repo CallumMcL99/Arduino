@@ -1,6 +1,6 @@
 /// ROV INS Arduino code. Version 1.0.1.
 /// This handles communication with the RovIns and CAN BUS communication.
-const String VERSION = " v1.0.2.4";
+const String VERSION = " v1.0.2.5";
 
 #include <DFRobot_MCP2515.h> // Can Bus
 #include "Wire.h"
@@ -17,7 +17,7 @@ DFRobot_MCP2515 CAN(SPI_CS_PIN);
 const int arduinoAddress = 9;
 int canErrorCount = 0;
 volatile byte canMessageCounter = 0;
-volatile bool canInterupt = true;
+volatile bool allowInterupt = true;
 
 // Messages sent in the Heartbeat message to indicate what code is running.
 const int InitialiseMessage_EthernetBegin = 1;
@@ -33,6 +33,8 @@ const int size = 8;
 uint8_t messageOne[size] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 unsigned long lastMessageSent = 0;
 volatile unsigned long lastHeadingRecieved = 0;
+volatile unsigned long lastDepthRecieved = 0;
+volatile unsigned long lastAltitudeRecieved = 0;
 volatile unsigned long lastDvlMessageRecieved = 0;
 unsigned long delayBetweenSendingMessagesMs = 100;
 
@@ -67,7 +69,7 @@ byte mac[] = {
   0xA8, 0x61, 0x0A, 0xAE, 0x24, 0x16
 };
 //IPAddress ip(192, 168, 137, 177);
-IPAddress ip(192, 168, 0, 177);
+IPAddress ip(192, 168, 36, 174);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
@@ -80,8 +82,9 @@ int ports[portCount] { 8111, 8113, 8221 };
 //IPAddress server(192, 168, 137, 1); // This is the IP used to connect the arduino to my PC for simulation.
 // IPAddress server_surfacePc(192, 168, 36, 130); // This is the IP used to connect the arduino to my PC for simulation. ---- This PC.
 IPAddress server_surfacePc(192, 168, 0, 150); // This is the IP used to connect the arduino to my PC for simulation. ---- Client PC
-IPAddress server_rovIns(192, 168, 0, 135); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
+IPAddress server_rovIns(192, 168, 36, 201); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
+// There are 3 connections: 2 listening to the RovinsNano (1 for each message), 1 for the Surface PC.
 int connectionFailedCounters[portCount] = { 0, 0, 0 };
 EthernetClient clients[portCount];
 bool EthernetConnecteds[portCount] = { false, false, false };
@@ -93,26 +96,29 @@ const int clientSurfaceId = 2;
 volatile double Pitch = 0;
 volatile double Roll = 0;
 volatile double Heading = 0;
-volatile double DistanceToBottom = 0;
+
+// Range to bottom.
 volatile double Altitude = 0;
 volatile double Depth;
 volatile int pidRecievedCounter = 0;
 
 volatile bool RovInsReady = false; // The RovIns required time to initialise once powered on (5 mins), before hand it will send Pitch & Roll but not Heading.
 volatile bool DvlReady = false; // The DVL won't send data if it's too close to the floor (50cm).
-volatile bool SendAttitude = false;
-volatile bool SendDepth = false;
+volatile bool SendAttitude = true;
+volatile bool SendDepth = true;
 
 // Debug
 bool printFunctionEntry = false;
-bool IsInRov = false;
+bool IsAttachedToCanBus = false;
+bool IsAttachedToSurfacePc = false;
 
 
 void setup() {
-  Serial.begin(250000, SERIAL_8N1);
+  //Serial.begin(250000, SERIAL_8N1);
+  Serial.begin(9600, SERIAL_8N1);
 
   // Only use this while debugging. This waits for a serial (USB) connection.
-  //while (!Serial) ;
+  while (!Serial) ;
 
   Serial.println("Serial initialisation - COMPLETE");
 
@@ -125,8 +131,8 @@ void setup() {
   longitudePID.SetOutputLimits(-1000, 1000);
 
   SendHeartBeatMessage(InitialiseMessage_PidLimitsSet, 0);
-
-  if (IsInRov)
+  
+  if (IsAttachedToCanBus)
   {
     // Set the function to be called when the CAN Bus recieved a message.
     pinMode(CAN_INT_PIN, INPUT);
@@ -144,14 +150,21 @@ void setup() {
 void InitialiseCanShield() {
   if (printFunctionEntry) Serial.println("ENTER: InitialiseCanShield");
 
-  Serial.println("CAN Shield Initialisation - START");
+  if (IsAttachedToCanBus)
+  {
+    Serial.println("CAN Shield Initialisation - START.");
 
-  while (CAN_OK != CAN.begin(CAN_500KBPS)){
-      Serial.println("CAN Shield Initialisation - ERROR");
-      delay(100);
+    while (CAN_OK != CAN.begin(CAN_500KBPS)){
+        Serial.println("CAN Shield Initialisation - ERROR.");
+        delay(100);
+    }
+    
+    Serial.println("CAN Shield Initialisation - SUCCESS.");
   }
-  
-  Serial.println("CAN Shield Initialisation - SUCCESS");
+  else
+  {
+    Serial.println("CAN Shield Initialisation - Ignored as not in ROV.");
+  }
 }
 
 void InitialiseEthernetShield(){
@@ -205,7 +218,7 @@ void loop() {
     delay(100);
     client1Connected = clients[1].connected();
 
-    if (!IsInRov)
+    if (IsAttachedToSurfacePc)
     {
       // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
       delay(100);
@@ -220,7 +233,8 @@ void loop() {
       // TODO: Error checking with maintain();
       Ethernet.maintain();
 
-      RovInsReadMessage_OctansStandard();
+      // RovInsReadMessage_OctansStandard();
+      RovInsReadMessage_PhinsStandard();
       RovInsReadMessage_RDIDP6();
     }
     else
@@ -235,13 +249,16 @@ void loop() {
     }
   }
 
-  if (client2Connected)
+  if (IsAttachedToSurfacePc)
   {
-    ReadMessage_SurfacePC();
-  }
-  else
-  {
-    HandleEthernetShieldConnection(clientSurfaceId, false);
+    if (client2Connected)
+    {
+      ReadMessage_SurfacePC();
+    }
+    else
+    {
+      HandleEthernetShieldConnection(clientSurfaceId, false);
+    }
   }
 
   ProcessDataAndReply(true);
@@ -274,6 +291,8 @@ void loop() {
     DvlReady = (now = millis() - lastDvlMessageRecieved)  > 1000;
 
     SendHeartBeatMessage(RunTimeMessage_Running, ethernetValue);
+
+    //SendThrusterCommand(1, 0);
   }
 }
 
@@ -283,7 +302,7 @@ bool InInterupt = false;
 // You cannot print with Serial while inside an interupt function.
 void CanBusInterupt() {
 
-  if (canInterupt)
+  if (allowInterupt)
   {
     ReadCanBusMessages();
   }
@@ -293,8 +312,8 @@ void CanBusInterupt() {
 // In an attemp to lose as few messages as possible, this function is called very frequently.
 // Call it multiple times in the loop, and since any lengthly while loops.
 void ReadCanBusMessages() {
-  canInterupt = false;
-  if (IsInRov)
+  allowInterupt = false;
+  if (IsAttachedToCanBus)
   {
     if (CAN_MSGAVAIL == CAN.checkReceive()) {
       
@@ -319,13 +338,13 @@ void ReadCanBusMessages() {
         // }
           canMessageCounter++;
 
-        //Serial.println("CAN: c" + String(command) + " a" + String(address));
+        // Serial.println("CAN: c" + String(command) + " a" + String(address));
 
         HandleTelegram(command, address, buf);
       }
     }
   }
-  canInterupt = true;
+  allowInterupt = true;
 }
 
 void HandleTelegram(int command, int address, byte buf[])
@@ -352,13 +371,13 @@ void HandleTelegram(int command, int address, byte buf[])
         HandlePidTuningCommand(buf, buf[0] == 5);
       }
     }
-    else if (address == 50)
-    {
-      if (command == 0xFFD5)
-      {
-        HandleRelayNodeCommand(buf);
-      }
-    }
+    // else if (address == 50)
+    // {
+    //   if (command == 0xFFD5)
+    //   {
+    //     HandleRelayNodeCommand(buf);
+    //   }
+    // }
   }
 }
 
@@ -397,7 +416,7 @@ void HandleSystemModeControlCommand(uint8_t buf[]){
 }
 
 void HandlePidTuningCommand(uint8_t buf[], bool isX){
-  canInterupt = false;
+  allowInterupt = false;
   if (printFunctionEntry) Serial.println("ENTER: HandlePidTuningCommand");
 
   if (isX)
@@ -423,11 +442,11 @@ void HandlePidTuningCommand(uint8_t buf[], bool isX){
   if (isX) type = "Lat";
   else type = "long";
   Serial.println("New tunings " + type + ": p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
-  canInterupt = true;
+  allowInterupt = true;
 }
 
 void HandleSystemMotionControlCommand(uint8_t buf[]){
-  canInterupt = false;
+  allowInterupt = false;
   if (printFunctionEntry) Serial.println("ENTER: HandleSystemMotionControlCommand");
   
   verticalMsb = buf[2];
@@ -437,7 +456,7 @@ void HandleSystemMotionControlCommand(uint8_t buf[]){
 
   //Serial.println("Recv Yaw: " + String(yawMsb) + "." + String(yawLsb));
   SendThrusterCommand(yOutput, xOutput);
-  canInterupt = true;
+  allowInterupt = true;
 }
 
 void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
@@ -470,12 +489,12 @@ void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
   // Serial.println(id >> 8);
   // Serial.println(id && 0xFF00);
 
-  if (IsInRov)
+  if (IsAttachedToCanBus)
   {
     uint32_t fullId = (id << 8) + address;
     CAN.sendMsgBuf(fullId, 1, size, message);
   }
-  else
+  else if (IsAttachedToSurfacePc)
   {
     if (clients[clientSurfaceId].connected())
     {
@@ -516,7 +535,7 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       else
       {
         // if you didn't get a connection to the server:
-        Serial.println("Ethernet Shield RT " + String(index) + " - No client found.");
+        Serial.println("Ethernet Shield RT " + String(index) + " - No client found on " + server.toString() + ":" + String(ports[index]) + ".");
         EthernetConnecteds[index] = false;
         connectionFailedCounters[index]++;
       }
@@ -551,7 +570,7 @@ void ProcessDataAndReply(bool tick){
       SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
     }
 
-    SendDepthAltMessage(Depth * 100, Altitude * 100);
+    SendDepthAltMessage(Depth, Altitude);
   }
 }
 
@@ -643,23 +662,39 @@ void SendAttitudeMessage(int heading, int pitch, int roll){
   messageOne[6] = 0;
   messageOne[7] = 0;
 
-  //Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
+  Serial.println("Sent attitude: Heading: " + String(heading) + ", Pitch: " + String(pitch) + ", Roll: " + String(roll));
   SendCanMessage(0xFFFF, 0, messageOne);
 }
 
-void SendDepthAltMessage(int depth, int alt){
+void SendDepthAltMessage(float depthF, float altF){
   if (printFunctionEntry) Serial.println("ENTER: SendDepthAltMessage");
+  Serial.println("Input depth:" + String(depthF));
+  // Serial.println("Input alt:" + String(altF));
+
+  int depth = depthF * 1.42 * 10;
+  int alt;
+  
+  long timeFromLastAltitudeMessage = millis() - lastAltitudeRecieved;
+  Serial.println("Last alt msg: " + String(timeFromLastAltitudeMessage));
+  if (timeFromLastAltitudeMessage < 2000)
+  {
+    alt = altF * 100;
+  }
+  else
+  {
+    alt = 105.5; // LOSS
+  }
 
   int altMsb = alt >> 8;
-
 
   if (alt < 0 )
   {
     altMsb = 256 + altMsb;
   }
 
-  if (SendDepth)
-  {
+
+  // if (SendDepth)
+  // {
     int depthMsb = depth >> 8;
     if (depth < 0 )
     {
@@ -673,29 +708,29 @@ void SendDepthAltMessage(int depth, int alt){
     messageOne[4] = 0;
     messageOne[5] = 0;
     messageOne[6] = 0;
-    messageOne[7] = 0;                    // depth 2 DP
+    messageOne[7] = 0;                    // depth 2 DP OR is altimeter data good.
     
-    //Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
+    Serial.println("Sent depth: Depth: " + String(depth) + ", Alt: " + String(alt));
 
     // Set the board select to 0 if not usuing an additional depth sensor, set to 9 otherwise.
     SendCanMessage(0xFFFE, 0, messageOne);
-  }
-  else
-  {
-    // Only send altitude
-    messageOne[0] = (byte)altMsb;       // altitude msb
-    messageOne[1] = (byte)alt & 0xFF;   // altitude lsb
-    messageOne[2] = 0;
-    messageOne[3] = 0;
-    messageOne[4] = 0;
-    messageOne[5] = 0;
-    messageOne[6] = 0;
-    messageOne[7] = 0;
+  // }
+  // else
+  // {
+  //   // Only send altitude
+  //   messageOne[0] = (byte)altMsb;       // altitude msb
+  //   messageOne[1] = (byte)alt & 0xFF;   // altitude lsb
+  //   messageOne[2] = 0;
+  //   messageOne[3] = 0;
+  //   messageOne[4] = 0;
+  //   messageOne[5] = 0;
+  //   messageOne[6] = 0;
+  //   messageOne[7] = 0;
 
-    //Serial.println("Sent Alt: " + String(alt));
+  //   //Serial.println("Sent Alt: " + String(alt));
 
-    SendCanMessage(0xFFCF, 0, messageOne);
-  }
+  //   SendCanMessage(0xFFCF, 0, messageOne);
+  // }
 }
 
 void SendHeartBeatMessage(int status, int additionalData){
@@ -704,6 +739,7 @@ void SendHeartBeatMessage(int status, int additionalData){
     int dataSending = 0;
     if (SendAttitude) dataSending += 1;
     if (SendDepth) dataSending += 2;
+    // if (SendAltitude) dataSending += 4;
 
     int dataRecieving = 0;
     if (RovInsReady) dataRecieving += 1;
@@ -718,7 +754,7 @@ void SendHeartBeatMessage(int status, int additionalData){
     messageOne[6] = pidRecievedCounter;               // Not used, how many times has the PID message been recieved.
     messageOne[7] = canMessageCounter;                // How many messages have been recieved.
 
-    //Serial.println("Hearbeat: msg:" + String(canMessageCounter));
+    Serial.println("Hearbeat: msg:" + String(canMessageCounter));
     SendCanMessage(0xFF8F, 9, messageOne);
 }
 
@@ -764,7 +800,7 @@ void RovInsReadMessage_OctansStandard() {
         Heading = String(headingMessage).toFloat();
         lastHeadingRecieved = millis();
         foundHeadingMessage = true;
-        //Serial.println("Heading: " + String(Heading));
+        Serial.println("Recv heading: " + String(Heading));
       }
       else if (!foundPitchAndRollMessage && message[3] == 'T' && message[4] == 'R' && message[5] == 'O')
       {
@@ -801,7 +837,7 @@ void RovInsReadMessage_OctansStandard() {
         Pitch = String(pitchMessage).toFloat();
         Roll = String(rollMessage).toFloat();
         foundPitchAndRollMessage = true;
-        //Serial.println("Pitch: " + String(Pitch));
+        Serial.println("Recv pitch: " + String(Pitch) + ". Roll: " + String(Roll));
         //Serial.println("Roll: " + String(Roll));
       }
     }
@@ -818,53 +854,81 @@ void RovInsReadMessage_OctansStandard() {
   }
 }
 
-void RovInsReadMessage_Hydrography() {
-  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_OctansStandard");
+void RovInsReadMessage_PhinsStandard() {
+  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_PhinsStandard");
 
   if (clients[clientOctansStandardId].available()) {
-    //$H,  Heading, roll, pitch, lat,    long,     alt,  heave*checksum
-    //$HYDRO,a.aaa,b.bbb,c.ccc,x.xxxxxxx,y.yyyyyyy,z.zzz,w.www*hh<CR><LF>
 
-    String message = "NA";
+    // Here there are 2 messages to search for:
+    // Heading - $HEHDT,4.55,T*1B
+    // Pitch/Roll - $PHTRO,7.44,P,14.22,B*71
+
+    bool foundHeadingMessage = false;
+    bool foundPitchAndRollMessage = false;
+    bool foundDepthMessage = false;
+
     while (clients[clientOctansStandardId].available())
     {
-      message = clients[clientOctansStandardId].readStringUntil('\n');
+      String message = clients[clientOctansStandardId].readStringUntil('\n');
+      Serial.println(message);
+        
+      if (!foundDepthMessage && message[7] == 'P' && message[8] == 'O' && message[9] == 'S')
+      {
+        // Depth message.
+        // $PIXSE,POSITI,57.17777256,357.89039440,-0.042*72
+        //       6     13          25           38
+
+        int i = 39;
+        char depthMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
+
+        Serial.println("Recv d: " + String(depthMessage));
+
+        Depth = String(depthMessage).toFloat();
+        lastDepthRecieved = millis();
+        foundDepthMessage = true;
+        Serial.println("Recv depth: " + String(Depth));
+      }
+      else if (!foundPitchAndRollMessage && message[7] == 'A' && message[8] == 'T' && message[9] == 'I')
+      {
+        // Roll and pitch message.
+        // $PIXSE,ATITUD,x.xxx,y.yyy*hh<CR><LF>
+
+        int i = 14;
+        char rollMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
+        Serial.println("Recv r: " + String(rollMessage));
+        Roll = String(rollMessage).toFloat();
+
+        i = 21;
+        char pitchMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
+        Serial.println("Recv p: " + String(pitchMessage));
+        Pitch = String(pitchMessage).toFloat();
+
+        foundPitchAndRollMessage = true;
+      }
+      else if (!foundHeadingMessage)
+      {
+        // Heading message
+        // $HEHDT,335.79,A*16
+
+        int i = 7;
+        char headingMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
+        Serial.println("Recv h: " + String(headingMessage));
+        Heading = String(headingMessage).toFloat();
+
+        foundHeadingMessage = true;
+      }
+      
     }
 
-    Serial.println(message);
-    String data = "";
-    int counter = 0; 
-    char c;
-    for (int i = 7; i < message.length(); i++)
+    //Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
+
+    // Clear the buffer.
+    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
+    while (clients[clientOctansStandardId].available())
     {
-      c = message[i];
-      if (c != ',')
-      {
-        data += c;
-      }
-      else
-      {
-        Serial.println(String(counter) + ": " + data);
-
-        // if (counter == 0)
-        // {
-        //   Heading = data.toInt();
-        // }
-        // else (counter == 1)
-        // {
-        //   Roll = data.toInt();
-        // } 
-        // else
-        // {
-        //   Pitch = data.toInt();
-        // }
-
-        data = "";
-        counter++;
-      }
+      //Serial.println("Cleaing buffer");
+      clients[clientOctansStandardId].readStringUntil('\n');
     }
-
-    Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
   }
 }
 
@@ -885,7 +949,7 @@ void RovInsReadMessage_RDIDP6() {
     while (clients[clientRdiPd6Id].available() && counter++ < 10 && (!speedMessageFound || !altitudeMessage))
     {
       String message = clients[clientRdiPd6Id].readStringUntil(':');
-      //Serial.println(String(counter) + " - " + message.length() + " - " + message);
+      Serial.println(message.length() + " - " + message);
       
       if (message.length() > 12)
       {
@@ -918,27 +982,31 @@ void RovInsReadMessage_RDIDP6() {
             currentYVelocity = -1023;
           }
 
-          //Serial.println("X Velocity: " + String(currentXVelocity));
+          Serial.println("Recv X Velocity: " + String(currentXVelocity) + ". Y Velocity: " + String(currentYVelocity));
           //Serial.println("Y Velocity: " + String(currentYVelocity));
         }
         else if (!altitudeMessage && message[0] == 'B' && message[1] == 'D' && message[2] == ',')
         {
-          // Bottom track message.
+          // Bottom track message - Bottom-Track, Earth-Referenced Distance Data
           // BD,±EEEEEEEE.EE,±NNNNNNNN.NN,±UUUUUUUU.UU,DDDD.DD,TTT.TT <CR><LF>
           
           altitudeMessage = true;
           Altitude = message.substring(42, 49).toFloat();
-
-          //Serial.println("Depth: " + String(Depth));
+          lastAltitudeRecieved = millis();
+          Serial.println("Recv altitude: " + String(Altitude));
         }
         else if (!depthMessage && message[0] == 'T' && message[1] == 'S' && message[2] == ',')
         {
-          // Depth message.
+          // Depth message - Timing And Scaling Data
+          // :TS,YYMMDDHHmmsshh,ss.s,+TT.T,DDDD.D,CCCC.C,BBB<CR><LF>
           depthMessage = true;
-          Depth = message.substring(30, 35).toFloat();
-          //Serial.println(String(Depth));
+          // Depth = message.substring(30, 35).toFloat();
+          
+          // Serial.println("Recv depth: " + String(Depth));
         }
       }
+
+      counter++;
     }
 
     //Serial.println("Alt: " + String(Altitude) + ", xVel: " + String(currentXVelocity) + ", yVal: " + String(currentYVelocity));
