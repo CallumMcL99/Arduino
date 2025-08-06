@@ -73,8 +73,8 @@ IPAddress ip(192, 168, 36, 174);
 
 // This port must match the port that tcp is being sent over.
 // int port = 10002; // I use this port for simulation.
-const int portCount = 3;
-int ports[portCount] { 8111, 8113, 8221 };
+const int portCount = 2;
+int ports[portCount] { 8111, 8113 };
 
 // Enter the IP address of the server you're connecting to. This should match the comupters IPv4 address.
 // If connecting to a Windows device, this is configured through:
@@ -85,27 +85,16 @@ IPAddress server_surfacePc(192, 168, 0, 150); // This is the IP used to connect 
 IPAddress server_rovIns(192, 168, 36, 201); // This is the IP used to connect to the RovIns. It's the same as the ID address for the web application. 192.168.36.1XX where XX is the last 2 digits of the serial number.
 
 // There are 3 connections: 2 listening to the RovinsNano (1 for each message), 1 for the Surface PC.
-int connectionFailedCounters[portCount] = { 0, 0, 0 };
+int connectionFailedCounters[portCount] = { 0, 0 };
 EthernetClient clients[portCount];
-bool EthernetConnecteds[portCount] = { false, false, false };
-const int clientOctansStandardId = 0;
+bool EthernetConnecteds[portCount] = { false, false };
+const int clientCockpitId = 0;
 const int clientRdiPd6Id = 1;
-const int clientSurfaceId = 2;
 
-// RovIns Info
-volatile double Pitch = 0;
-volatile double Roll = 0;
-volatile double Heading = 0;
-
-// Range to bottom.
-volatile double Altitude = 0;
-volatile double Depth;
 volatile int pidRecievedCounter = 0;
 
-volatile bool RovInsReady = false; // The RovIns required time to initialise once powered on (5 mins), before hand it will send Pitch & Roll but not Heading.
+float Altitude = 0;
 volatile bool DvlReady = false; // The DVL won't send data if it's too close to the floor (50cm).
-volatile bool SendAttitude = true;
-volatile bool SendDepth = true;
 
 // Debug
 bool printFunctionEntry = false;
@@ -113,9 +102,6 @@ bool printVersionOnLoop = false;
 bool printDataRecv = false;
 bool printDataSend = false;
 bool printEthernet = true;
-
-bool IsAttachedToCanBus = false;
-bool IsAttachedToSurfacePc = false;
 
 
 void setup() {
@@ -127,49 +113,15 @@ void setup() {
 
   Serial.println("Serial initialisation - COMPLETE");
 
-  InitialiseCanShield();
-
   Serial.println(VERSION);
   InitialiseEthernetShield();
 
   latitudePID.SetOutputLimits(-1000, 1000);
   longitudePID.SetOutputLimits(-1000, 1000);
 
-  SendHeartBeatMessage(InitialiseMessage_PidLimitsSet, 0);
-  
-  if (IsAttachedToCanBus)
-  {
-    // Set the function to be called when the CAN Bus recieved a message.
-    pinMode(CAN_INT_PIN, INPUT);
-    pinMode(CAN_INT_PIN, INPUT_PULLUP); // Not needed?
-    attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), CanBusInterupt, CHANGE);
-  
-    delayBetweenSendingMessagesMs = 1000;
-  }
-
   SendHeartBeatMessage(InitialiseMessage_Complete, 0);
   
   Serial.println("Running " + VERSION);
-}
-
-void InitialiseCanShield() {
-  if (printFunctionEntry) Serial.println("ENTER: InitialiseCanShield");
-
-  if (IsAttachedToCanBus)
-  {
-    Serial.println("CAN Shield Initialisation - START.");
-
-    while (CAN_OK != CAN.begin(CAN_500KBPS)){
-        Serial.println("CAN Shield Initialisation - ERROR.");
-        delay(100);
-    }
-    
-    Serial.println("CAN Shield Initialisation - SUCCESS.");
-  }
-  else
-  {
-    Serial.println("CAN Shield Initialisation - Ignored as not in ROV.");
-  }
 }
 
 void InitialiseEthernetShield(){
@@ -226,24 +178,12 @@ void loop() {
     // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
     delay(100);
     client1Connected = clients[1].connected();
-
-    if (IsAttachedToSurfacePc)
-    {
-      // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
-      delay(100);
-      client2Connected = clients[2].connected();
-    }
-
-    // The interupt flag seems to get stuck, but calling this sorts that out.
-    ReadCanBusMessages();
     
     if (client0Connected && client1Connected)
     {
       // TODO: Error checking with maintain();
       Ethernet.maintain();
 
-      // RovInsReadMessage_OctansStandard();
-      RovInsReadMessage_PhinsStandard();
       RovInsReadMessage_RDIDP6();
     }
     else
@@ -252,21 +192,6 @@ void loop() {
       HandleEthernetShieldConnection(1, true);
 
       DvlReady = false;
-      RovInsReady = false;
-      //SendDepth = false;
-      //SendAttitude = false;
-    }
-  }
-
-  if (IsAttachedToSurfacePc)
-  {
-    if (client2Connected)
-    {
-      ReadMessage_SurfacePC();
-    }
-    else
-    {
-      HandleEthernetShieldConnection(clientSurfaceId, false);
     }
   }
 
@@ -296,34 +221,19 @@ void loop() {
     }
 
     now = millis();
-    RovInsReady = (now = millis() - lastHeadingRecieved)  > 1000;
     DvlReady = (now = millis() - lastDvlMessageRecieved)  > 1000;
 
     SendHeartBeatMessage(RunTimeMessage_Running, ethernetValue);
 
-    x();
-
-    //SendThrusterCommand(1, 0);
+    SendDataToCockpit();
   }
 }
 
-bool InInterupt = false;
-
-// This function is called whenever the CAN Bus recieved a message.
-// You cannot print with Serial while inside an interupt function.
-void CanBusInterupt() {
-
-  if (allowInterupt)
-  {
-    ReadCanBusMessages();
-  }
-}
-
-void x(){
-  if (clients[clientOctansStandardId].connected())
+void SendDataToCockpit(){
+  if (clients[clientCockpitId].connected())
   {
     Serial.println("Ethernet Shield RT 0 - Write");
-    EthernetClient client = clients[clientOctansStandardId];
+    EthernetClient client = clients[clientCockpitId];
 
     String PostData = "ArdunioTime" + String(millis());
     client.println("POST /Api/AddParking/3 HTTP/1.1");
@@ -335,45 +245,6 @@ void x(){
     client.println();
     client.println(PostData);
   }
-}
-
-// I don't think Can Bus messages are queued, you just have to read at the correct time
-// In an attemp to lose as few messages as possible, this function is called very frequently.
-// Call it multiple times in the loop, and since any lengthly while loops.
-void ReadCanBusMessages() {
-  allowInterupt = false;
-  if (IsAttachedToCanBus)
-  {
-    if (CAN_MSGAVAIL == CAN.checkReceive()) {
-      
-      uint8_t len = 0;
-      while (CAN.checkReceive() == CAN_MSGAVAIL){
-        uint8_t buf[16];
-
-        CAN.readMsgBuf(&len, buf);
-
-        uint32_t id = CAN.getCanId();
-        uint32_t command = id >> 8;
-
-        // Replace with: address = id & 0xFF00;
-        uint32_t address = id - (command << 8);
-        
-        // if (((int)byte) >= 255)
-        // {
-        //   canMessageCounter = 0;
-        // }
-        // else
-        // {
-        // }
-          canMessageCounter++;
-
-        // Serial.println("CAN: c" + String(command) + " a" + String(address));
-
-        HandleTelegram(command, address, buf);
-      }
-    }
-  }
-  allowInterupt = true;
 }
 
 void HandleTelegram(int command, int address, byte buf[])
@@ -513,13 +384,6 @@ void PrintCanMessage(uint32_t id, uint8_t buf[], uint8_t len){
   Serial.println("CAN Message: Address: " + String(address) + ". Command: " + commandStr + ". DLC: " + String(len) + ". Data: " + dataStr);
 }
 
-void HandleRelayNodeCommand(uint8_t buf[])
-{
-  SendAttitude = (buf[0] & 1) == 1;
-  SendDepth = (buf[0] & 2) == 2;
-  Serial.println("HIT RELAY CMD");
-}
-
 void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
   if (printFunctionEntry) Serial.println("ENTER: SendCanMessage");
 
@@ -527,25 +391,6 @@ void SendCanMessage(uint32_t id, uint32_t address, uint8_t message[]) {
   // Serial.println(id >> 8);
   // Serial.println(id && 0xFF00);
 
-  if (IsAttachedToCanBus)
-  {
-    uint32_t fullId = (id << 8) + address;
-    CAN.sendMsgBuf(fullId, 1, size, message);
-  }
-  else if (IsAttachedToSurfacePc)
-  {
-    if (clients[clientSurfaceId].connected())
-    {
-      //Serial.println("$ARD," + String(id) + "," + String(address) + "0,0,0,0,0,0,0,0," + "#");
-      
-      clients[clientSurfaceId].print(
-        "$ARD," + String(id) + "," + String(address) +
-        "," + String(message[0]) + "," + String(message[1]) + "," + String(message[2]) + "," + String(message[3]) +
-        "," + String(message[4]) + "," + String(message[5]) + "," + String(message[6]) + "," + String(message[7]) +
-        "#"
-      );
-    }
-  }
 }
 
 void HandleEthernetShieldConnection(int index, bool rovIns){
@@ -611,16 +456,6 @@ void ProcessDataAndReply(bool tick){
     
   if (stationKeepingEnabled) {
     HandlePidAndSendThrusterCommand();
-  }
-
-  if (tick)
-  {
-    if (SendAttitude)
-    {
-      SendAttitudeMessage(Heading * 10, Pitch * 10, Roll * 10);
-    }
-
-    SendDepthAltMessage(Depth, Altitude);
   }
 }
 
@@ -806,12 +641,9 @@ void SendHeartBeatMessage(int status, int additionalData){
   if (printFunctionEntry) Serial.println("ENTER: SendHeartBeatMessage");
 
     int dataSending = 0;
-    if (SendAttitude) dataSending += 1;
-    if (SendDepth) dataSending += 2;
     // if (SendAltitude) dataSending += 4;
 
     int dataRecieving = 0;
-    if (RovInsReady) dataRecieving += 1;
     if (DvlReady) dataRecieving += 2;
 
     messageOne[0] = status;                           // Status message - usually the place this function was called from.
@@ -829,199 +661,6 @@ void SendHeartBeatMessage(int status, int additionalData){
     }
       
     SendCanMessage(0xFF8F, 9, messageOne);
-}
-
-void RovInsReadMessage_OctansStandard() {
-  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_OctansStandard");
-
-  if (clients[clientOctansStandardId].available()) {
-
-    // Here there are 2 messages to search for:
-    // Heading - $HEHDT,4.55,T*1B
-    // Pitch/Roll - $PHTRO,7.44,P,14.22,B*71
-
-    bool foundHeadingMessage = false;
-    bool foundPitchAndRollMessage = false;
-    int counter = 0;
-    while (clients[clientOctansStandardId].available())
-    {
-      String message = clients[clientOctansStandardId].readStringUntil('\n');
-      //Serial.println(String(counter) + " - " + message);
-        
-      if (!foundHeadingMessage && message[3] == 'H' && message[4] == 'D' && message[5] == 'T')
-      {
-        // Heading message.
-        // $HEHDT,4.55,T*1B
-
-        char headingMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        bool commaFound = false;
-        int j = 0;
-
-        for (int i = 7; i < message.length() && !commaFound; i++)
-        {
-          if (message[i] != ',')
-          {
-            headingMessage[j] = message[i];
-            j++;
-          }
-          else
-          {
-            commaFound = true;
-          }
-        }
-
-        Heading = String(headingMessage).toFloat();
-        lastHeadingRecieved = millis();
-        foundHeadingMessage = true;
-
-        if (printDataRecv)
-        {
-          Serial.println("Recv heading: " + String(Heading));
-        }
-      }
-      else if (!foundPitchAndRollMessage && message[3] == 'T' && message[4] == 'R' && message[5] == 'O')
-      {
-        // Attitude message.
-        // $PHTRO,7.44,P,14.22,B*71
-
-        int commasFound = 0;
-        int j = 0;
-        char pitchMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        char rollMessage[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-
-        for (int i = 7; i < message.length() && commasFound < 3; i++)
-        {
-          if (message[i] != ',')
-          {
-            if (commasFound == 0)
-            {
-              pitchMessage[j] = message[i];
-            }
-            else if (commasFound == 2)
-            {
-              rollMessage[j] = message[i];
-            }
-
-            j++;
-          }
-          else
-          {
-            j = 0;
-            commasFound++;
-          }
-        }
-
-        Pitch = String(pitchMessage).toFloat();
-        Roll = String(rollMessage).toFloat();
-        foundPitchAndRollMessage = true;
-        
-        if (printDataRecv)
-        {
-          Serial.println("Recv pitch: " + String(Pitch) + ". Roll: " + String(Roll));
-          //Serial.println("Roll: " + String(Roll));
-        }
-      }
-    }
-
-    //Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
-
-    // Clear the buffer.
-    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
-    while (clients[clientOctansStandardId].available())
-    {
-      //Serial.println("Cleaing buffer");
-      clients[clientOctansStandardId].readStringUntil('\n');
-    }
-  }
-}
-
-void RovInsReadMessage_PhinsStandard() {
-  if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_PhinsStandard");
-
-  if (clients[clientOctansStandardId].available()) {
-
-    // Here there are 2 messages to search for:
-    // Heading - $HEHDT,4.55,T*1B
-    // Pitch/Roll - $PHTRO,7.44,P,14.22,B*71
-
-    bool foundHeadingMessage = false;
-    bool foundPitchAndRollMessage = false;
-    bool foundDepthMessage = false;
-
-    while (clients[clientOctansStandardId].available())
-    {
-      String message = clients[clientOctansStandardId].readStringUntil('\n');
-      // Serial.println(message);
-        
-      if (!foundDepthMessage && message[7] == 'P' && message[8] == 'O' && message[9] == 'S')
-      {
-        // Depth message.
-        // $PIXSE,POSITI,57.17777256,357.89039440,-0.042*72
-        //       6     13          25           38
-
-        int i = 39;
-        char depthMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
-
-        Depth = String(depthMessage).toFloat();
-        lastDepthRecieved = millis();
-        foundDepthMessage = true;
-
-        if (printDataRecv)
-        {
-          Serial.println("Recv d: " + String(depthMessage));
-          Serial.println("Recv depth: " + String(Depth));
-        }
-      }
-      else if (!foundPitchAndRollMessage && message[7] == 'A' && message[8] == 'T' && message[9] == 'I')
-      {
-        // Roll and pitch message.
-        // $PIXSE,ATITUD,x.xxx,y.yyy*hh<CR><LF>
-
-        int i = 14;
-        char rollMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
-        Roll = String(rollMessage).toFloat();
-
-        i = 21;
-        char pitchMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
-        Pitch = String(pitchMessage).toFloat();
-
-        if (printDataRecv)
-        {
-          Serial.println("Recv r: " + String(rollMessage));
-          Serial.println("Recv p: " + String(pitchMessage));
-        }
-
-        foundPitchAndRollMessage = true;
-      }
-      else if (!foundHeadingMessage)
-      {
-        // Heading message
-        // $HEHDT,335.79,A*16
-
-        int i = 7;
-        char headingMessage[6] = { message[i++], message[i++], message[i++], message[i++], message[i++], message[i++] };
-        Heading = String(headingMessage).toFloat();
-
-        if (printDataRecv)
-        {
-          Serial.println("Recv h: " + String(headingMessage));
-        }
-
-        foundHeadingMessage = true;
-      }
-      
-    }
-
-    //Serial.println("Heading: " + String(Heading) + ", pitch: " + String(Pitch) + ", roll: " + String(Roll));
-
-    // Clear the buffer.
-    // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
-    while (clients[clientOctansStandardId].available())
-    {
-      //Serial.println("Cleaing buffer");
-      clients[clientOctansStandardId].readStringUntil('\n');
-    }
-  }
 }
 
 void RovInsReadMessage_RDIDP6() {
@@ -1128,55 +767,6 @@ void RovInsReadMessage_RDIDP6() {
     if (cleanCounter != 0)
     {
       //Serial.println("Cleaned buffer: " + String(cleanCounter));
-    }
-  }
-}
-
-void ReadMessage_SurfacePC() {
-  if (printFunctionEntry) Serial.println("ENTER: ReadMessage_SurfacePC");
-
-  if (clients[clientSurfaceId].available()) {
-
-    //int counter = 0;
-    while (clients[clientSurfaceId].available())
-    {
-      String message = clients[clientSurfaceId].readStringUntil('#');
-
-      int id = message.substring(5, 13).toInt();
-      int address = id & 0xFF;
-      id = id >> 8;
-
-      int length = message.substring(14, 15).toInt();
-      
-      int commaCounter = 0;
-      String dataStrs[length];
-      byte datas[length];
-
-      if (length > 0)
-      {
-        dataStrs[0] = "";
-      }
-
-      char c;
-      for (int i = 16; i < message.length()&& commaCounter <= length; i++)
-      {
-        c = message[i];
-        if (c != ',')
-        {
-          if (c == '0' || c == '1' || c == '2' || c == '3' || c == '4' || c == '5' || c == '6' || c == '7' ||c == '8' || c == '9')
-          {
-            dataStrs[commaCounter] += c;
-          }
-        }
-        else if (c == ',')
-        {
-          datas[commaCounter] = dataStrs[commaCounter].toInt();
-          commaCounter++;
-        }
-      }
-
-      canMessageCounter++;
-      HandleTelegram(id, address, datas);
     }
   }
 }
