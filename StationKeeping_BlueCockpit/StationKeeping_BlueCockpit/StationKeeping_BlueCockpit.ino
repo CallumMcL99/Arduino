@@ -24,6 +24,17 @@ unsigned long lastMessageSent = 0;
 volatile bool stationKeepingEnabled = false;
 volatile bool newPosition = false;
 
+// Gather stationary data
+bool gatherStationaryDataEnabled = false;
+const long gatherStationaryDataDuration = 60000; // 60s
+long gatherStationaryDataStarted = 0;
+int gatherStationaryDataIndex = 0;
+double stationaryXData = 0;
+double stationaryYData = 0;
+double stationaryXAverage = 0;
+double stationaryYAverage = 0;
+bool stationaryDataGathered = false;
+
 // Data from RovIns
 volatile double currentXVelocity;
 volatile double currentYVelocity;
@@ -180,6 +191,10 @@ void loop() {
     if (stationKeepingEnabled) {
       CalculatePids();
     }
+    else if (gatherStationaryDataEnabled)
+    {
+      HandleGatherStationaryData();
+    }
 
     HandleSerialInput();
 
@@ -218,14 +233,7 @@ void SendDataToCockpit(){
     PostData.concat(",");
     PostData.concat(currentYVelocity);
     PostData.concat("?");
-
-    // client.println("POST /Api/AddParking/3 HTTP/1.1");
-    // client.println("Host: 10.0.0.138");
-    // client.println("User-Agent: Arduino/1.0");
-    // // client.println("Connection: close");
-    // client.print("Content-Length: ");
-    // client.println(PostData.length());
-    // client.println();
+    
     client.print(PostData);
 
     if (printDataSend)
@@ -369,6 +377,11 @@ void HandleSerialInput()
       //sk0
       ToggleStationKeeping(s[2] == '1');
     }
+    else if (s[0] == 'g' && s[1] == 's' && s[2] == 'd')
+    {
+      //gsd
+      ToggleGatherStationaryData(s[3] == '1');
+    }
   }
 }
 
@@ -399,6 +412,30 @@ void ToggleStationKeeping(bool enabled)
   }
 }
 
+void ToggleGatherStationaryData(bool enabled)
+{
+  if (printFunctionEntry) Serial.println("ENTER: ToggleGatherStationaryData");
+
+  if (gatherStationaryDataEnabled != enabled)
+  {
+    gatherStationaryDataEnabled = enabled;
+
+    if (gatherStationaryDataEnabled)
+    {
+      Serial.println("Gather stationary data mode enabled");
+      gatherStationaryDataIndex = 0;
+      stationaryXData = 0;
+      gatherStationaryDataStarted = millis();
+    }
+    else
+    {
+      Serial.println("Gather stationary data mode disabled");
+
+      CalculateStationaryAverage();
+    }
+  }
+}
+
 void CalculatePids() {
   if (printFunctionEntry) Serial.println("ENTER: HandlePidAndSendThrusterCommand");
 
@@ -423,6 +460,45 @@ void CalculatePids() {
       // "\nxVel: " + String(currentXVelocity) + ", xAccum: " + String(accumX) + ", xOut: " + String(xOutput) +
       "yVel: " + String(currentYVelocity) + ", yAccum: " + String(accumY) + ", yOut: " + String(yOutput)
       );
+  }
+}
+
+void HandleGatherStationaryData()
+{
+  if (printFunctionEntry) Serial.println("ENTER: HandleGatherStationaryData");
+
+  if (newVelocityData)
+  {
+    newVelocityData = false;
+    
+    stationaryYData += currentYVelocity;
+
+    Serial.println("GSD: " + String(gatherStationaryDataIndex) +", CurrentYVel: " + String(currentYVelocity) + ", accumulatedY: " + String (stationaryYData));
+
+    gatherStationaryDataIndex++;
+
+    if (millis() > gatherStationaryDataStarted + gatherStationaryDataDuration)
+    {
+      ToggleGatherStationaryData(false);
+    }
+  }
+}
+
+void CalculateStationaryAverage()
+{
+  if (printFunctionEntry) Serial.println("ENTER: CalculateStationaryAverage");
+
+  if (gatherStationaryDataIndex > 1)
+  {
+    stationaryYAverage = stationaryYData / gatherStationaryDataIndex;
+    if (stationaryYAverage < 0)
+    {
+      stationaryYAverage *= -1;
+    }
+
+    stationaryDataGathered = true;
+
+    Serial.println("GSD finished. Y: " + String(stationaryYAverage));
   }
 }
 
@@ -459,65 +535,69 @@ void RovInsReadMessage_RDIDP6() {
 
           float xVel = message.substring(3, 9).toFloat();
           float yVel = message.substring(10, 16).toFloat();
-          const float minRawVelocityReading = 1.5;
+
+          const double range = 100;
+          const float minRawVelocityReading = 2;
+          const float minVelocityReading = minRawVelocityReading / range;
 
           if (xVel != badVelocityData && yVel != badVelocityData)
           {
-            if (yVel > minRawVelocityReading || yVel < -minRawVelocityReading || xVel > minRawVelocityReading || xVel < -minRawVelocityReading)
-            {
               newVelocityData = true;
 
-              if (xVel > minRawVelocityReading || xVel < -minRawVelocityReading)
+            if ((stationaryDataGathered || gatherStationaryDataEnabled) && (yVel > minRawVelocityReading || yVel < -minRawVelocityReading || xVel > minRawVelocityReading || xVel < -minRawVelocityReading))
+            {
+              currentXVelocity = xVel / range;
+              currentYVelocity = yVel / range;
+
+              if (stationaryDataGathered)
               {
-                currentXVelocity = xVel / 100.0;
-              }
-              else
-              {
-                currentXVelocity = 0;
+                if (currentYVelocity > 0)
+                {
+                  currentYVelocity -= stationaryYAverage;
+
+                  if (currentYVelocity < minVelocityReading)
+                  {
+                    currentYVelocity = 0;
+                    Serial.println("Tiny Y velocity reading");
+                  }
+                }
+                else if (currentYVelocity < 0)
+                {
+                  currentYVelocity += stationaryYAverage;
+
+                  if (currentYVelocity > -minVelocityReading)
+                  {
+                    currentYVelocity = 0;
+                    Serial.println("Tiny Y velocity reading");
+                  }
+                }
               }
 
-              if (yVel > minRawVelocityReading || yVel < -minRawVelocityReading)
+              if (currentYVelocity != 0)// || currentXVelocity != 0)
               {
-                currentYVelocity = yVel / 100.0;
-              }
-              else
-              {
-                currentYVelocity = 0;
-              }
+                lastVelocityMessage = millis();
 
-              lastVelocityMessage = millis();
-
-              if (printDataRecv)
-              {
-                Serial.println("Recv X Velocity: " + String(currentXVelocity) + ". Y Velocity: " + String(currentYVelocity));
-                //Serial.println("Y Velocity: " + String(currentYVelocity));
+                if (printDataRecv)
+                {
+                  Serial.println("Recv X Velocity: " + String(currentXVelocity) + ". Y Velocity: " + String(currentYVelocity));
+                  //Serial.println("Y Velocity: " + String(currentYVelocity));
+                }
+                else
+                {
+                  Serial.println("Good velocity data recv.");
+                }
               }
-              else
-              {
-                Serial.println("Good velocity data recv.");
-              }
-              // For PID the values must be clamped to this range.
-              // if (currentXVelocity > 1023)
-              // {
-              //   currentXVelocity = 1023;
-              // }
-              // else if (currentXVelocity < -1023)
-              // {
-              //   currentXVelocity = -1023;
-              // }
-              
-              // if (currentYVelocity > 1023)
-              // {
-              //   currentYVelocity = 1024;
-              // }
-              // else if (currentYVelocity < -1023)
-              // {
-              //   currentYVelocity = -1023;
-              // }
             }
             else
             {
-              Serial.println("Tiny velocity data recv.");
+              if (!stationaryDataGathered && !gatherStationaryDataEnabled)
+              {
+                Serial.println("Velocity has no stationary reference");
+              }
+              else
+              {
+                Serial.println("Tiny velocity data recv.");
+              }
             }
           }
           else{
