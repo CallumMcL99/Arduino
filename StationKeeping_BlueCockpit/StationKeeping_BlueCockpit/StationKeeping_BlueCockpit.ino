@@ -34,11 +34,12 @@ volatile long lastVelocityMessage = -1;
 //Define Variables we'll be connecting to
 volatile double xOutput, yOutput;
 volatile double xKp = 2, xKi = 5, xKd = 1;
-volatile double yKp = 2, yKi = 5, yKd = 1;
-PID_v2 latitudePID(xKp, xKi, xKd, PID::Direct); //X
-PID_v2 longitudePID(yKp, yKi, yKd, PID::Direct); //Y
-int accumX = 0;
-int accumY = 0;
+volatile double yKp = 0.2, yKi = 0, yKd = 0;
+PID_v2 xPID(xKp, xKi, xKd, PID::Direct);
+PID_v2 yPID(yKp, yKi, yKd, PID::Direct);
+double accumX = 0;
+double accumY = 0;
+volatile long lastPidCalc = -1;
 
 // Ethernet
 // This is the mac address and ip address for this device. The mac address is on the back of the Ethernet Shield.
@@ -58,6 +59,8 @@ IPAddress servers[portCount] { IPAddress(192, 168, 10, 203), IPAddress(192, 168,
 // There are 3 connections: 2 listening to the RovinsNano (1 for each message), 1 for the Surface PC.
 int connectionFailedCounters[portCount] = { 0, 0 };
 EthernetClient clients[portCount];
+bool clientLastConnected[portCount] = {false, false};
+String clientNames[portCount] = {"Cockpit", "DVL"};
 bool EthernetConnecteds[portCount] = { false, false };
 const int clientCockpitId = 0;
 const int clientRdiPd6Id = 1;
@@ -70,8 +73,8 @@ volatile bool DvlReady = false; // The DVL won't send data if it's too close to 
 // Debug
 bool printFunctionEntry = false;
 bool printVersionOnLoop = false;
-bool printDataRecv = true;
-bool printDataSend = false;
+bool printDataRecv = false;
+bool printDataSend = true;
 bool printEthernet = true;
 
 
@@ -87,8 +90,12 @@ void setup() {
   Serial.println(VERSION);
   InitialiseEthernetShield();
 
-  latitudePID.SetOutputLimits(-1000, 1000);
-  longitudePID.SetOutputLimits(-1000, 1000);
+  xPID.SetSampleTime(100);
+  yPID.SetSampleTime(100);
+
+  int range = 100000;
+  xPID.SetOutputLimits(-range, +range);
+  yPID.SetOutputLimits(-range, +range);
   
   Serial.println("Running " + VERSION);
 }
@@ -116,6 +123,7 @@ void InitialiseEthernetShield(){
   Serial.println("Ethernet Shield Initialisation - COMPLETE.");
 }
 
+bool client0Connected = false, client1Connected = false;
 void loop() {
   if (printFunctionEntry) Serial.println("ENTER: loop");
   
@@ -132,20 +140,23 @@ void loop() {
     tick = true;
   }
 
-  bool client0Connected, client1Connected;
   if (Ethernet.linkStatus() != LinkOFF)
   {
-    delay(100);
-    client0Connected = clients[0].connected();
-
-    // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
-    delay(100);
-    client1Connected = clients[1].connected();
-    
-    if (client0Connected || client1Connected)
+    if (tick)
     {
-      Ethernet.maintain();
+      delay(100);
+      client0Connected = clients[0].connected();
+
+      // A delay seems to be needed between checking each client is connected, otherwise the latter check fails.
+      delay(100);
+      client1Connected = clients[1].connected();
+      
+      if (client0Connected || client1Connected)
+      {
+        Ethernet.maintain();
+      }
     }
+    
 
     if (!client0Connected)
     {
@@ -163,69 +174,91 @@ void loop() {
       DvlReady = false;
     }
   }
-
-  //ProcessDataAndReply(true);
   
-  if (tick)
+  if (client0Connected || client1Connected)
   {
+    if (stationKeepingEnabled) {
+      CalculatePids();
+    }
+
+    HandleSerialInput();
+
     SendDataToCockpit();
+    // if (tick)
+    // {
+    // }
+  }
+  else
+  {
+    // If either connection is missing, sleep for 1 second. This gives the developer time to reprogram the arduino by stopping a connection.
+    // (If an arduino is running code without a break it cannot be interupted to be reprogrammed)
+    delay(1000);
   }
 }
 
 void SendDataToCockpit(){
+  if (printFunctionEntry) Serial.println("ENTER: SendDataToCockpit");
+  
   if (clients[clientCockpitId].connected())
   {
     // Serial.println("Ethernet Shield RT 0 - Write");
     EthernetClient client = clients[clientCockpitId];
 
-    //$Ard_last DVL data ms,last pid,forward cmd,lateral cmd?
-    String PostData = "$Ard_";// + "0" + "," + "0" + "," + "0" + "," + "0" + "?";
+    //$Ard_last DVL data ms,last pid,forward cmd,lateral cmd,forward vel, lateral val?
+    String PostData = "$Ard_";
+    PostData.concat(lastVelocityMessage);
+    PostData.concat(",");
+    PostData.concat(lastPidCalc);
+    PostData.concat(",");
+    PostData.concat(xOutput); // fwd cmd
+    PostData.concat(",");
+    PostData.concat(yOutput); // lat cmd
+    PostData.concat(",");
+    PostData.concat(currentXVelocity);
+    PostData.concat(",");
+    PostData.concat(currentYVelocity);
+    PostData.concat("?");
 
-    client.println("POST /Api/AddParking/3 HTTP/1.1");
-    client.println("Host: 10.0.0.138");
-    client.println("User-Agent: Arduino/1.0");
-    client.println("Connection: close");
-    client.print("Content-Length: ");
-    client.println(PostData.length());
-    client.println();
-    client.println(PostData);
+    // client.println("POST /Api/AddParking/3 HTTP/1.1");
+    // client.println("Host: 10.0.0.138");
+    // client.println("User-Agent: Arduino/1.0");
+    // // client.println("Connection: close");
+    // client.print("Content-Length: ");
+    // client.println(PostData.length());
+    // client.println();
+    client.print(PostData);
+
+    if (printDataSend)
+    {
+      // Serial.println("SENDING: " + PostData);
+    }
   }
 }
 
-void HandlePidTuningCommand(uint8_t buf[], bool isX){
+void HandlePidTuningCommand(bool isX, float kP, float kI, float kD){
   if (printFunctionEntry) Serial.println("ENTER: HandlePidTuningCommand");
 
   if (isX)
   {
-    xKp = buf[1];
-    xKi = buf[2];
-    xKd = buf[3];
-    latitudePID.SetTunings(xKp, xKi, xKd);
-    latitudePID.Start(0, 0, 0);
+    xKp = kP;
+    xKi = kI;
+    xKd = kD;
+    xPID.SetTunings(xKp, xKi, xKd);
+    xPID.Start(accumX, 0, 0);
+    xPID.SetMode(PID::Automatic);
   }
   else
   {
-    yKp = xKp;
-    yKi = xKi;
-    yKd = xKd;
-    longitudePID.SetTunings(yKp, yKi, yKd);
-    longitudePID.Start(0, 0, 0);
-  }
-  
-  pidRecievedCounter = buf[4];
-
-  String type;
-  if (isX) type = "Lat";
-  else type = "long";
-
-  if (printDataRecv)
-  {
-    Serial.println("New tunings " + type + ": p" + String(xKp) + ", i" + String(xKi) + ", d" + String(xKd));
+    yKp = kP;
+    yKi = kI;
+    yKd = kD;
+    yPID.SetTunings(yKp, yKi, yKd);
+    yPID.Start(accumY, 0, 0);
   }
 }
 
 void HandleEthernetShieldConnection(int index, bool rovIns){
-  if (printFunctionEntry) Serial.println("ENTER: HandleEthernetShieldConnection");
+  if (printFunctionEntry) Serial.println("ENTER: HandleEthernetShieldConnection for " + clientNames[index]);
   
   if (Ethernet.hardwareStatus() != EthernetNoHardware && Ethernet.linkStatus() != LinkOFF)// && connectionFailedCounters[index] < 20)
   {
@@ -245,7 +278,12 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
       {
         if (printEthernet)
         {
-          Serial.println("Ethernet Shield RT " + String(index) + " - client connected.");
+          if (!clientLastConnected[index])
+          {
+            Serial.println("Ethernet Shield RT " + String(index) + " - client connected - " + clientNames[index]);
+            clientLastConnected[index] = true;
+          }
+
         }
 
         EthernetConnecteds[index] = true;
@@ -256,7 +294,7 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
         // if you didn't get a connection to the server:
         if (printEthernet)
         {
-          Serial.println("Ethernet Shield RT " + String(index) + " - No client found on " + server.toString() + ":" + String(port) + ".");
+          Serial.println("Ethernet Shield RT " + String(index) + " - No client found on " + server.toString() + ":" + String(port) + " - " + clientNames[index]);
         }
           
         EthernetConnecteds[index] = false;
@@ -268,7 +306,11 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
   {
     if (printEthernet)
     {
-      Serial.println("Ethernet Shield RT " + String(index) + " - Error.");
+      if (clientLastConnected[index])
+      {
+        Serial.println("Ethernet Shield RT " + String(index) + " - Error - " + clientNames[index]);
+        clientLastConnected[index] = false;
+      }
     }
 
     EthernetConnecteds[index] = false;
@@ -283,15 +325,81 @@ void HandleEthernetShieldConnection(int index, bool rovIns){
   }
 }
 
-void ProcessDataAndReply(bool tick){
-  if (printFunctionEntry) Serial.println("ENTER: ProcessDataAndReply. Tick: " + String(tick));
-    
-  if (stationKeepingEnabled) {
-    HandlePidAndSendThrusterCommand();
+void HandleSerialInput()
+{
+  if (printFunctionEntry) Serial.println("ENTER: HandleSerialInput");
+  
+  if (Serial.available() > 0)
+  {
+    String s = Serial.readString();
+    //Serial.print("READ: " + s);
+    s.toLowerCase();
+
+    if (s[0] == 'p' && s[1] == 'i' && s[2] == 'd')
+    {
+      if (s[3] != '?')
+      {
+        // pidx00.00,11.11,22.22
+        String kP = s.substring(4, 9);
+        String kI = s.substring(10, 15);
+        String kD = s.substring(16, 21);
+
+        Serial.print("PID parameters recv. ");
+        if (s[3] == 'x')
+        {
+          Serial.print("X. ");
+        }
+        else if (s[3] == 'y')
+        {
+          Serial.print("Y. ");
+        }
+        Serial.println("kP: " + kP + ", kI: " + kI + ", kD: " + kD + ".");
+
+        HandlePidTuningCommand(s[3] == 'x', kP.toFloat(), kI.toFloat(), kD.toFloat());
+      }
+      else
+      {
+        // pid?
+        Serial.println("PID X. kP: " + String(xKp) + ", kI: " + String(xKi) + ", kD: " + String(xKd) + ".");
+        Serial.println("PID Y. kP: " + String(yKp) + ", kI: " + String(yKi) + ", kD: " + String(yKd) + ".");
+      }
+    }
+    else if (s[0] == 's' && s[1] == 'k')
+    {
+      //sk0
+      ToggleStationKeeping(s[2] == '1');
+    }
   }
 }
 
-void HandlePidAndSendThrusterCommand() {
+void ToggleStationKeeping(bool enabled)
+{
+  if (printFunctionEntry) Serial.println("ENTER: ToggleStationKeeping");
+  
+  stationKeepingEnabled = enabled;
+  
+  currentYVelocity = 0;
+  currentXVelocity = 0;
+  accumY = 0;
+  accumX = 0;
+  xOutput = 0;
+  yOutput = 0;
+
+  if (stationKeepingEnabled)
+  {
+    Serial.println("Station keeping enabled.");
+    
+    yPID.Start(accumY, 0, 0);
+    xPID.Start(accumX, 0, 0);
+    
+  }
+  else
+  {
+    Serial.println("Station keeping disabled.");
+  }
+}
+
+void CalculatePids() {
   if (printFunctionEntry) Serial.println("ENTER: HandlePidAndSendThrusterCommand");
 
   if (newVelocityData)
@@ -299,33 +407,42 @@ void HandlePidAndSendThrusterCommand() {
     newVelocityData = false;
     accumX += currentXVelocity;
     accumY += currentYVelocity;
+  }
 
-    xOutput = latitudePID.Run(accumX);
-    yOutput = longitudePID.Run(accumY);
+  xOutput = xPID.Run(accumX);
+  yOutput = yPID.Run(accumY);
 
-    if (printDataSend)
-    {
-      Serial.println("xVel: " + String(currentXVelocity) + ", xOut: " + String(xOutput) + ", yVel: " + String(currentYVelocity) + ", yOut: " + String(yOutput));
-    }
+  // xOutput = latitudePID.Run(currentXVelocity);
+  // yOutput = longitudePID.Run(currentYVelocity);
+
+  lastPidCalc = millis();
+
+  if (printDataSend)
+  {
+    Serial.println(
+      // "\nxVel: " + String(currentXVelocity) + ", xAccum: " + String(accumX) + ", xOut: " + String(xOutput) +
+      "yVel: " + String(currentYVelocity) + ", yAccum: " + String(accumY) + ", yOut: " + String(yOutput)
+      );
   }
 }
+
+const float badVelocityData = -32768.00;
 
 void RovInsReadMessage_RDIDP6() {
   if (printFunctionEntry) Serial.println("ENTER: RovInsReadMessage_RDIPD6");
 
   if (clients[clientRdiPd6Id].available())
   {
-    // Search for the following messages, with these unique characters
-    // $PIXSE,SPEED_,2.889,-4.202,-0.041*6B
-    // $PIXSE,POSITI,-23.36996014,317.41925983,8.862*73
-
     bool speedMessageFound = false;
     int counter = 0;
 
-    while (clients[clientRdiPd6Id].available() && counter++ < 10 && speedMessageFound)
+    // This must be greater than 4, otherwise it will not have time to cycle through all the previous messages.
+    const int maxDvlReadAttempts = 10;
+    
+    while (clients[clientRdiPd6Id].available() && counter++ < maxDvlReadAttempts && !speedMessageFound)
     {
       String message = clients[clientRdiPd6Id].readStringUntil(':');
-
+     
       if (printDataRecv)
       {
         //Serial.println(message.length() + " - " + message);
@@ -339,35 +456,72 @@ void RovInsReadMessage_RDIDP6() {
           // BI,±TTTTT,±LLLLL,±NNNNN,±MMMMM,S<CR><LF>
 
           speedMessageFound = true;
-          newVelocityData = true;
-          currentXVelocity = message.substring(3, 9).toFloat();
-          currentYVelocity = message.substring(10, 16).toFloat();
 
-          lastVelocityMessage = millis();
+          float xVel = message.substring(3, 9).toFloat();
+          float yVel = message.substring(10, 16).toFloat();
+          const float minRawVelocityReading = 1.5;
 
-          // For PID the values must be clamped to this range.
-          if (currentXVelocity > 1023)
+          if (xVel != badVelocityData && yVel != badVelocityData)
           {
-            currentXVelocity = 1023;
-          }
-          else if (currentXVelocity < -1023)
-          {
-            currentXVelocity = -1023;
-          }
-          
-          if (currentYVelocity > 1023)
-          {
-            currentYVelocity = 1024;
-          }
-          else if (currentYVelocity < -1023)
-          {
-            currentYVelocity = -1023;
-          }
+            if (yVel > minRawVelocityReading || yVel < -minRawVelocityReading || xVel > minRawVelocityReading || xVel < -minRawVelocityReading)
+            {
+              newVelocityData = true;
 
-          if (printDataRecv)
-          {
-            Serial.println("Recv X Velocity: " + String(currentXVelocity) + ". Y Velocity: " + String(currentYVelocity));
-            //Serial.println("Y Velocity: " + String(currentYVelocity));
+              if (xVel > minRawVelocityReading || xVel < -minRawVelocityReading)
+              {
+                currentXVelocity = xVel / 100.0;
+              }
+              else
+              {
+                currentXVelocity = 0;
+              }
+
+              if (yVel > minRawVelocityReading || yVel < -minRawVelocityReading)
+              {
+                currentYVelocity = yVel / 100.0;
+              }
+              else
+              {
+                currentYVelocity = 0;
+              }
+
+              lastVelocityMessage = millis();
+
+              if (printDataRecv)
+              {
+                Serial.println("Recv X Velocity: " + String(currentXVelocity) + ". Y Velocity: " + String(currentYVelocity));
+                //Serial.println("Y Velocity: " + String(currentYVelocity));
+              }
+              else
+              {
+                Serial.println("Good velocity data recv.");
+              }
+              // For PID the values must be clamped to this range.
+              // if (currentXVelocity > 1023)
+              // {
+              //   currentXVelocity = 1023;
+              // }
+              // else if (currentXVelocity < -1023)
+              // {
+              //   currentXVelocity = -1023;
+              // }
+              
+              // if (currentYVelocity > 1023)
+              // {
+              //   currentYVelocity = 1024;
+              // }
+              // else if (currentYVelocity < -1023)
+              // {
+              //   currentYVelocity = -1023;
+              // }
+            }
+            else
+            {
+              Serial.println("Tiny velocity data recv.");
+            }
+          }
+          else{
+            Serial.println("Bad velocity data recv.");
           }
         }
       }
@@ -375,13 +529,29 @@ void RovInsReadMessage_RDIDP6() {
       counter++;
     }
 
+    
+    if (!speedMessageFound)
+    {
+      Serial.println("No velocity data recv.");
+    }
+
+
     // Clear the buffer.
     // This is important as if a backlog of data builds up, we will never have current data, only exponentially old data.
     int cleanCounter = 0;
     while (clients[clientRdiPd6Id].available())
     {
       cleanCounter++;
-      clients[clientRdiPd6Id].readStringUntil('\n');
+      //clients[clientRdiPd6Id].flush();
+      // clients[clientRdiPd6Id].readStringUntil('\n');
+      clients[clientRdiPd6Id].read();
+    }
+
+    if (printDataRecv && cleanCounter != 0)
+    {
+      Serial.println("Cleaned DVL: " + String(cleanCounter));
     }
   }
+
+   //Serial.println("EXIT: RovInsReadMessage_RDIDP6");
 }
